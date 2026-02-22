@@ -229,68 +229,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Its audio (acknowledgments like "Got it") should not be played back. Only capture the transcription.
                 sonic = NovaSonicSession(
                     on_audio_chunk=lambda x: None,  # Suppress Nova Sonic's own audio output
-                    on_text_chunk=lambda t: handle_text_chunk(t, False),
+                    on_text_chunk=lambda t, iu: handle_text_chunk(t, iu) if iu else None, 
                     on_finished=handle_finished
                 )
-                
-                original_process = sonic._process_responses
-                async def patched_process():
-                    try:
-                        while sonic.is_active:
-                            if not sonic.stream: break
-                            output = await sonic.stream.await_output()
-                            result = await output[1].receive()
-                            if result is None or getattr(result, 'value', None) is None:
-                                break
-
-                            if getattr(result.value, 'bytes_', None):
-                                response_data = result.value.bytes_.decode('utf-8')
-                                try:
-                                    json_data = json.loads(response_data)
-                                except json.JSONDecodeError:
-                                    continue
-
-                                if 'event' in json_data:
-                                    event = json_data['event']
-                                    with open('bedrock_stream.log', 'a') as f:
-                                        f.write(f"RAW EVENT: {json.dumps(event)}\n")
-                                        if 'contentStart' in event:
-                                            content_start = event['contentStart'] 
-                                            sonic.role = content_start.get('role', '')
-                                            if 'additionalModelFields' in content_start:
-                                                af = json.loads(content_start['additionalModelFields'])
-                                                if af.get('generationStage') == 'SPECULATIVE':
-                                                    sonic.display_assistant_text = True
-                                                else:
-                                                    sonic.display_assistant_text = False
-                                        elif 'textOutput' in event:
-                                            text = event['textOutput']['content']    
-                                            # Only capture user's speech transcription from Nova Sonic, not its acknowledgments
-                                            if sonic.role == "USER":
-                                                await handle_text_chunk(text, True)
-                                            elif sonic.role == "ASSISTANT":
-                                                # Suppress Nova Sonic's assistant text responses (like "Got it") - we only want transcription
-                                                logger.debug(f"Suppressing Nova Sonic assistant response: {text[:30]}")
-                                        elif 'audioOutput' in event:
-                                            # Skip Nova Sonic's audio output - we only want transcription
-                                            # The agent will handle creating TTS audio for responses
-                                            pass
-                                        elif 'contentEnd' in event:
-                                            if sonic.role == "USER":
-                                                await handle_finished()
-                                        elif 'promptEnd' in event:
-                                            await handle_finished()
-                                            
-                            if result is None or getattr(result, 'value', None) is None:
-                                await handle_finished()
-                                break
-                    except Exception as e:
-                        import traceback
-                        print(f"Nova Sonic Process Response Error: {e}", file=sys.stderr, flush=True)
-                        traceback.print_exc(file=sys.stderr)
-                        sonic.is_active = False
-
-                sonic._process_responses = patched_process
                 
                 session_data["sonic"] = sonic
                 session_data["user_transcripts"] = []

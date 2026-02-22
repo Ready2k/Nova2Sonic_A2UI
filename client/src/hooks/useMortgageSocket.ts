@@ -242,6 +242,16 @@ export function useMortgageSocket(url: string) {
                 }
             } else if (type === 'server.voice.stop') {
                 console.log('[WebSocket] Received server.voice.stop, streamer exists:', !!streamerRef.current);
+                if (streamerRef.current) {
+                    const oldStreamer = streamerRef.current;
+                    // Null out IMMEDIATELY so the NEXT server.voice.audio creates a fresh streamer.
+                    // We keep oldStreamer alive via local ref so its already-scheduled WebAudio
+                    // buffers can play through to completion.
+                    streamerRef.current = null;
+                    oldStreamer.stopAcceptingChunks();
+                    // Tear down the AudioContext after already-queued audio has played out
+                    setTimeout(() => oldStreamer.stop(), 4000);
+                }
                 setTimeout(() => setVoicePlaying(false), 2000);
             } else if (type === 'server.a2ui.patch') {
                 if (!uiPatchLatencyRef.current && requestStartRef.current) {

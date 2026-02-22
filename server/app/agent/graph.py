@@ -206,6 +206,14 @@ def render_missing_inputs(state: AgentState):
 
                 response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
                 msg = response.content
+                
+                # Safety Refusal Check
+                refusal_keywords = ["unable to respond", "cannot fulfill", "cannot answer", "personal or people"]
+                if any(kw in msg.lower() for kw in refusal_keywords):
+                    logger.warning(f"Bedrock refusal detected in response: {msg}")
+                    # Provide a friendly fallback that redirects to the mortgage task
+                    msg = f"I'm here to help with your Barclays mortgage. To keep things moving, could you please tell me your {target_field}?"
+
             except Exception as e:
                 logger.error(f"LLM generation error: {e}")
                 # Fallback to static if LLM fails
@@ -442,6 +450,13 @@ def render_products_a2ui(state: AgentState):
             
             response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
             msg = response.content
+            
+            # Safety Refusal Check
+            refusal_keywords = ["unable to respond", "cannot fulfill", "cannot answer", "personal or people"]
+            if any(kw in msg.lower() for kw in refusal_keywords):
+                logger.warning(f"Bedrock refusal detected in product intro: {msg}")
+                msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options for you. Take a look at the products below."
+
         except Exception as e:
             logger.error(f"LLM product intro generation error: {e}")
             msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."

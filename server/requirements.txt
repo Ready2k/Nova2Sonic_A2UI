@@ -6,3 +6,8 @@ langgraph
 langchain
 langchain-core
 pytest
+python-dotenv==1.2.1
+geopy==2.4.1
+boto3
+botocore
+langchain-aws

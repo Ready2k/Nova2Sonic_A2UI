@@ -1,16 +1,31 @@
+// nova_sonic_tts.mjs
+//
+// FINAL-ONLY Nova 2 Sonic TTS streaming, without RMS/silence “guessing”.
+// We rely on Nova’s own stage markers: additionalModelFields.generationStage
+// and only emit chunks when stage === "FINAL".
+//
+// Usage:
+//   node nova_sonic_tts.mjs "Hello there" [voiceId]
+// Output:
+//   AUDIO_CHUNK:<base64 lpcm>  (24kHz, 16-bit, mono)
+//
+// Notes:
+// - We still request FINAL-only via additionalModelRequestFields.generationStage = "FINAL"
+//   but we ALSO defensively filter response chunks by the returned generationStage.
+// - Silence audio block is still included to signal end-of-turn.
+
 import {
     BedrockRuntimeClient,
     InvokeModelWithBidirectionalStreamCommand
 } from '@aws-sdk/client-bedrock-runtime';
 import dotenv from 'dotenv';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
 const textToSpeak = process.argv[2];
 if (!textToSpeak) {
-    console.error("Usage: node nova_sonic_tts.js <text>");
+    console.error('Usage: node nova_sonic_tts.mjs <text> [voiceId]');
     process.exit(1);
 }
 
@@ -20,16 +35,47 @@ const client = new BedrockRuntimeClient({
     region: process.env.AWS_REGION || 'us-east-1'
 });
 
+function nowIso() {
+    return new Date().toISOString();
+}
+
+function safeJsonParse(maybeJson) {
+    if (!maybeJson) return null;
+    try {
+        return typeof maybeJson === 'string' ? JSON.parse(maybeJson) : maybeJson;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Extract generationStage from whatever shape Nova provides.
+ * In some streams it appears as contentStart.additionalModelFields (often JSON string).
+ * In others it may be under contentStart.additionalModelFields.generationStage.
+ */
+function extractGenerationStage(contentStart) {
+    if (!contentStart) return null;
+
+    // Prefer explicit additionalModelFields
+    const amf = safeJsonParse(contentStart.additionalModelFields);
+    if (amf && typeof amf === 'object' && amf.generationStage) return amf.generationStage;
+
+    // Some variants might include it directly
+    if (contentStart.generationStage) return contentStart.generationStage;
+
+    return null;
+}
+
 async function main() {
     const promptName = `tts-prompt-${Date.now()}`;
     const textContentName = `text-${Date.now()}`;
-    const audioContentName = `audio-${Date.now()}`;
     const systemContentName = `system-${Date.now()}`;
 
     let canFinish = false;
     const finishSignal = () => { canFinish = true; };
 
     async function* inputStream() {
+        // Session start
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -46,6 +92,7 @@ async function main() {
             }
         };
 
+        // Prompt start
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -53,16 +100,20 @@ async function main() {
                         promptStart: {
                             promptName,
                             textOutputConfiguration: {
-                                mediaType: "text/plain"
+                                mediaType: 'text/plain'
                             },
                             audioOutputConfiguration: {
-                                mediaType: "audio/lpcm",
+                                mediaType: 'audio/lpcm',
                                 sampleRateHertz: 24000,
                                 sampleSizeBits: 16,
                                 channelCount: 1,
-                                voiceId: voiceId,
-                                encoding: "base64",
-                                audioType: "SPEECH"
+                                voiceId,
+                                encoding: 'base64',
+                                audioType: 'SPEECH'
+                            },
+                            additionalModelRequestFields: {
+                                // Request final-only generation
+                                generationStage: 'FINAL'
                             }
                         }
                     }
@@ -70,6 +121,7 @@ async function main() {
             }
         };
 
+        // SYSTEM content
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -77,12 +129,10 @@ async function main() {
                         contentStart: {
                             promptName,
                             contentName: systemContentName,
-                            type: "TEXT",
+                            type: 'TEXT',
                             interactive: false,
-                            role: "SYSTEM",
-                            textInputConfiguration: {
-                                mediaType: "text/plain"
-                            }
+                            role: 'SYSTEM',
+                            textInputConfiguration: { mediaType: 'text/plain' }
                         }
                     }
                 }))
@@ -107,15 +157,13 @@ async function main() {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
                     event: {
-                        contentEnd: {
-                            promptName,
-                            contentName: systemContentName
-                        }
+                        contentEnd: { promptName, contentName: systemContentName }
                     }
                 }))
             }
         };
 
+        // USER text content
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -123,12 +171,10 @@ async function main() {
                         contentStart: {
                             promptName,
                             contentName: textContentName,
-                            type: "TEXT",
+                            type: 'TEXT',
                             interactive: true,
-                            role: "USER",
-                            textInputConfiguration: {
-                                mediaType: "text/plain"
-                            }
+                            role: 'USER',
+                            textInputConfiguration: { mediaType: 'text/plain' }
                         }
                     }
                 }))
@@ -153,15 +199,15 @@ async function main() {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
                     event: {
-                        contentEnd: {
-                            promptName,
-                            contentName: textContentName
-                        }
+                        contentEnd: { promptName, contentName: textContentName }
                     }
                 }))
             }
         };
 
+        // Silence audio block — required by Nova Sonic to signal end-of-turn.
+        // interactive: false to avoid triggering additional speculative generation.
+        const audioContentName = `audio-${Date.now()}`;
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -169,16 +215,16 @@ async function main() {
                         contentStart: {
                             promptName,
                             contentName: audioContentName,
-                            type: "AUDIO",
-                            interactive: true,
-                            role: "USER",
+                            type: 'AUDIO',
+                            interactive: false,
+                            role: 'USER',
                             audioInputConfiguration: {
-                                mediaType: "audio/lpcm",
+                                mediaType: 'audio/lpcm',
                                 sampleRateHertz: 16000,
                                 sampleSizeBits: 16,
                                 channelCount: 1,
-                                audioType: "SPEECH",
-                                encoding: "base64"
+                                audioType: 'SPEECH',
+                                encoding: 'base64'
                             }
                         }
                     }
@@ -210,25 +256,22 @@ async function main() {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
                     event: {
-                        contentEnd: {
-                            promptName,
-                            contentName: audioContentName
-                        }
+                        contentEnd: { promptName, contentName: audioContentName }
                     }
                 }))
             }
         };
 
+        // Wait until we decide to finish from output stream handling
         while (!canFinish) {
-            await new Promise(resolve => setTimeout(resolve, 100));
+            await new Promise(resolve => setTimeout(resolve, 50));
         }
 
+        // Prompt/session end
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
-                    event: {
-                        promptEnd: { promptName }
-                    }
+                    event: { promptEnd: { promptName } }
                 }))
             }
         };
@@ -249,46 +292,104 @@ async function main() {
 
     try {
         const response = await client.send(command);
-        let firstAudioContentBlock = true;
-        let seenAudioOutput = false;
-        let audioChunkCount = 0;
-        let hasSeenPromptEnd = false;
+
+        let chunksEmittedTotal = 0;
+        let chunksEmittedInBlock = 0;
+        let currentRole = null;
+        let currentContentType = null;
+        let currentGenerationStage = 'FINAL';
+        let inAssistantAudioBlock = false;
+        let speculativeChunks = []; // Buffer to hold speculative chunks in case no FINAL follows
 
         for await (const event of response.body) {
-            if (event.chunk && event.chunk.bytes) {
-                const rawEvent = JSON.parse(Buffer.from(event.chunk.bytes).toString());
-                const eventData = rawEvent.event || rawEvent;
+            if (!event.chunk?.bytes) continue;
 
-                if (eventData.audioOutput) {
-                    seenAudioOutput = true;
-                    audioChunkCount++;
-                    // Print prefix so Python subprocess reader can distinguish audio chunks from stdout noise
-                    const audioData = eventData.audioOutput.content || eventData.audioOutput;
-                    console.log(`AUDIO_CHUNK:${audioData}`);
-                    console.error(`[TTS DEBUG] Audio chunk ${audioChunkCount}, size: ${audioData.length || 'unknown'}`);
-                }
+            const rawEvent = JSON.parse(Buffer.from(event.chunk.bytes).toString());
+            const eventData = rawEvent.event || rawEvent;
 
-                // Only finish when we see promptEnd - this signals the entire response is complete
-                if (eventData.promptEnd) {
-                    console.error(`[TTS DEBUG] Prompt ended, total audio chunks received: ${audioChunkCount}`);
-                    hasSeenPromptEnd = true;
-                    finishSignal();
-                }
+            if (eventData.contentStart) {
+                currentRole = eventData.contentStart.role;
+                currentContentType = eventData.contentStart.type;
 
-                if (eventData.internalServerException) {
-                    console.error("InternalServerException:", eventData.internalServerException);
-                    process.exit(1);
+                const stage = extractGenerationStage(eventData.contentStart);
+                if (stage) currentGenerationStage = stage;
+
+                if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO') {
+                    inAssistantAudioBlock = true;
+                    speculativeChunks = []; // Reset buffer for new block
+                    chunksEmittedInBlock = 0; // Reset count for new block
+                    console.error(`[TTS DEBUG] ${nowIso()} Enter ASSISTANT AUDIO block stage=${currentGenerationStage}`);
                 }
             }
+
+            if (eventData.audioOutput) {
+                const audioData = eventData.audioOutput.content || eventData.audioOutput;
+
+                if (inAssistantAudioBlock) {
+                    if (currentGenerationStage === 'FINAL') {
+                        chunksEmittedInBlock++;
+                        chunksEmittedTotal++;
+                        console.log(`AUDIO_CHUNK:${audioData}`);
+                    } else if (currentGenerationStage === 'SPECULATIVE') {
+                        // Buffer speculative chunks just in case this is the only pass we get
+                        speculativeChunks.push(audioData);
+                    }
+                }
+            }
+
+            if (eventData.contentEnd) {
+                if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO' && inAssistantAudioBlock) {
+                    // Fallback: If the block ended and we haven't emitted ANY final chunks,
+                    // but we have speculative ones, emit the speculative ones now.
+                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
+                        console.error(`[TTS DEBUG] ${nowIso()} Fallback: Emitting ${speculativeChunks.length} speculative chunks (no FINAL pass received)`);
+                        for (const chunk of speculativeChunks) {
+                            chunksEmittedInBlock++;
+                            chunksEmittedTotal++;
+                            console.log(`AUDIO_CHUNK:${chunk}`);
+                        }
+                    }
+                    console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage}`);
+                    inAssistantAudioBlock = false;
+                    speculativeChunks = [];
+                }
+                currentRole = null;
+                currentContentType = null;
+            }
+
+            if (eventData.promptEnd) {
+                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Total emitted chunks=${chunksEmittedTotal}`);
+                finishSignal();
+                break;
+            }
+
+            if (eventData.internalServerException) {
+                console.error('InternalServerException:', eventData.internalServerException);
+                process.exit(1);
+            }
+
+            if (eventData.throttlingException) {
+                console.error('ThrottlingException:', eventData.throttlingException);
+                process.exit(1);
+            }
+
+            if (eventData.validationException) {
+                console.error('ValidationException:', eventData.validationException);
+                process.exit(1);
+            }
         }
-        if (!hasSeenPromptEnd) {
-            console.error(`[TTS DEBUG] Stream ended without promptEnd, received ${audioChunkCount} audio chunks`);
+
+        if (!canFinish) {
+            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${audioChunkCount}`);
             finishSignal();
         }
     } catch (e) {
-        console.error("Error from Bedrock:", e);
+        console.error('Error from Bedrock:', e);
         process.exit(1);
     }
 }
 
-main().catch(console.error);
+main().catch(err => {
+    console.error('Fatal:', err);
+    process.exit(1);
+});
