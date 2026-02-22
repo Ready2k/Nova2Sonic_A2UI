@@ -8,7 +8,8 @@ export interface A2UIComponent {
     variant?: string;
     value?: number;
     max?: number;
-    data?: any;
+    data?: Record<string, unknown>;
+    focus?: boolean;
 }
 
 export interface A2UIUpdateComponents {
@@ -23,7 +24,7 @@ export interface A2UIPayload {
 
 interface A2RendererProps {
     a2uiState: A2UIPayload | null;
-    onAction: (id: string, data?: any) => void;
+    onAction: (id: string, data?: Record<string, unknown>) => void;
 }
 
 const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
@@ -69,7 +70,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                     h3: 'text-xl font-bold',
                     body: 'text-sm leading-relaxed',
                 }[component.variant || 'body'];
-                const focusClasses = (component as any).focus
+                const focusClasses = component.focus
                     ? 'text-blue-600 animate-pulse'
                     : component.variant === 'h1' || component.variant === 'h2'
                         ? 'text-blue-950'
@@ -114,7 +115,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                     </div>
                 );
             case 'ProductCard':
-                const p = component.data;
+                const p = (component.data ?? {}) as { id?: string; name?: string; rate?: number; fee?: number; monthlyPayment?: number; totalInterest?: number };
                 return (
                     <div
                         key={id}
@@ -161,7 +162,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         className="w-full bg-blue-600 text-white px-6 py-4 rounded-2xl font-black uppercase tracking-widest text-sm hover:bg-blue-700 transition-all shadow-lg active:scale-[0.98] mt-4"
                         onClick={() => {
                             if (component.data?.url) {
-                                window.open(component.data.url, '_blank');
+                                window.open(String(component.data.url), '_blank');
                             } else {
                                 onAction(id, component.data);
                             }
@@ -173,6 +174,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
             case 'Image':
                 return (
                     <div key={id} className="flex justify-center p-4">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                             src={component.data?.url}
                             alt={component.text}

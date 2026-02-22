@@ -1,6 +1,12 @@
 import React from 'react';
 
-export default function LatencyHud({ latency, connected }: { latency: any, connected: boolean }) {
+interface LatencyMetrics {
+    ttfb: number | null;
+    uiPatchLatency: number | null;
+    voiceLatency: number | null;
+}
+
+export default function LatencyHud({ latency, connected }: { latency: LatencyMetrics, connected: boolean }) {
     return (
         <div className="text-xs font-mono space-y-1 mt-4 p-3 bg-gray-900 rounded text-green-400 border border-gray-700 shadow-inner">
             <div className={`flex items-center gap-2 mb-2 pb-2 border-b border-gray-700 ${connected ? 'text-green-500' : 'text-red-500'}`}>

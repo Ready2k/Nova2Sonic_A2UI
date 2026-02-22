@@ -1,5 +1,5 @@
 class PCM16Processor extends AudioWorkletProcessor {
-    process(inputs, outputs, parameters) {
+    process(inputs) {
         const input = inputs[0];
         if (input && input.length > 0) {
             const float32Data = input[0];
