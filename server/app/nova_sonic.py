@@ -20,6 +20,7 @@ class NovaSonicSession:
         self.on_finished = on_finished
         
         self.is_active = False
+        self._is_processing = False
         self.audio_buffer = []  # To store base64 chunks
         self.system_prompt = ""
 
@@ -28,6 +29,7 @@ class NovaSonicSession:
         self.system_prompt = system_prompt or ""
         self.audio_buffer = []
         self.is_active = True
+        self._is_processing = False
 
     async def start_audio_input(self):
         logger.info("Nova Sonic: Ready for audio input")
@@ -40,9 +42,10 @@ class NovaSonicSession:
         self.audio_buffer.append(base64_audio)
 
     async def end_audio_input(self):
-        if not self.is_active:
+        if not self.is_active or self._is_processing:
             return
         
+        self._is_processing = True
         logger.info(f"Nova Sonic: Audio input ended, processing {len(self.audio_buffer)} chunks")
         full_audio_b64 = "".join(self.audio_buffer)
         self.audio_buffer = []
@@ -128,10 +131,12 @@ class NovaSonicSession:
             import traceback
             traceback.print_exc()
         finally:
+            self._is_processing = False
             self.is_active = False
 
     async def end_session(self):
         self.is_active = False
+        self._is_processing = False
         self.audio_buffer = []
 
     async def _process_responses(self):

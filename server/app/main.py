@@ -88,43 +88,59 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
 
 
 async def process_outbox(websocket: WebSocket, sid: str):
-    state = sessions[sid]["state"]
-    outbox = state.get("outbox", [])
-    voice_say_count = len([e for e in outbox if e["type"] == "server.voice.say"])
-    logger.info(f"[process_outbox] Processing {len(outbox)} events, {voice_say_count} voice.say events")
-    sonic_active = sessions[sid].get("sonic") is not None
-    
-    # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
-    for event in outbox:
-        if event["type"] != "server.voice.say":
-            logger.info(f"Emitting from outbox: {event['type']}")
-            await send_msg(websocket, sid, event["type"], event.get("payload"))
+    session_data = sessions.get(sid)
+    if not session_data:
+        return
 
-    # Pass 2: handle voice.say last
-    for event in outbox:
-        if event["type"] == "server.voice.say":
-            text_to_speak = event.get("payload", {}).get("text", "")
-            logger.info(f"Emitting from outbox: server.voice.say -> '{text_to_speak[:60]}'")
-            # Echo to chat transcript immediately
-            await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
+    if session_data.get("processing_outbox"):
+        logger.warning(f"Nova Sonic: process_outbox already in progress for {sid}, skipping.")
+        return
+    
+    session_data["processing_outbox"] = True
+    try:
+        state = session_data["state"]
+        outbox = state.get("outbox", [])
+        if not outbox:
+            return
             
-            # Skip TTS if client is in Text Only mode
-            if state.get("mode") == "text":
-                logger.info("Skipping TTS (client in Text Only mode)")
-                continue
+        # Clear outbox immediately to prevent race conditions
+        state["outbox"] = []
+        
+        voice_say_count = len([e for e in outbox if e["type"] == "server.voice.say"])
+        logger.info(f"[process_outbox] Processing {len(outbox)} events, {voice_say_count} voice.say events")
+        
+        # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
+        for event in outbox:
+            if event["type"] != "server.voice.say":
+                logger.info(f"Emitting from outbox: {event['type']}")
+                await send_msg(websocket, sid, event["type"], event.get("payload"))
 
-            # Send TTS if not already playing voice from another source
-            if not sessions[sid].get("voice_playing"):
-                logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
-                # No active voice session — fire TTS as background task (non-blocking)
-                sessions[sid]["voice_playing"] = True
-                asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
-            else:
-                logger.warning(f"[TTS] Skipping TTS - voice already playing")
-    
-    # Clear outbox and thinking state
-    state["outbox"] = []
-    await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
+        # Pass 2: handle voice.say last
+        for event in outbox:
+            if event["type"] == "server.voice.say":
+                text_to_speak = event.get("payload", {}).get("text", "")
+                logger.info(f"Emitting from outbox: server.voice.say -> '{text_to_speak[:60]}'")
+                # Echo to chat transcript immediately
+                await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
+                
+                # Skip TTS if client is in Text Only mode
+                if state.get("mode") == "text":
+                    logger.info("Skipping TTS (client in Text Only mode)")
+                    continue
+
+                # Send TTS if not already playing voice from another source
+                if not session_data.get("voice_playing"):
+                    logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
+                    # No active voice session — fire TTS as background task (non-blocking)
+                    session_data["voice_playing"] = True
+                    asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
+                else:
+                    logger.warning(f"[TTS] Skipping TTS - voice already playing")
+        
+        # Clear thinking state
+        await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
+    finally:
+        session_data["processing_outbox"] = False
 
 
 @app.websocket("/ws")
@@ -191,32 +207,40 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ALWAYS read the latest state — never use the stale closure variable
                 current_state = sessions[sid]["state"]
                 
-                assist_text = "".join(session_data.get("assist_buffer", [])).strip()
-                if assist_text:
-                    current_state["messages"].append({"role": "assistant", "text": assist_text})
-                    session_data["assist_buffer"] = []
-
-                full_transcript = " ".join(session_data["user_transcripts"]).strip()
-                if not full_transcript:
+                if session_data.get("handling_finished"):
+                    logger.warning(f"Nova Sonic: handle_finished already in progress for {sid}, skipping duplicate.")
                     return
-                session_data["user_transcripts"] = []
                 
-                await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
-                
-                current_state["transcript"] = full_transcript
-                current_state["mode"] = "voice"
-                current_state["messages"].append({"role": "user", "text": full_transcript})
-                
-                await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
-                
+                session_data["handling_finished"] = True
                 try:
-                    res = await asyncio.to_thread(app_graph.invoke, current_state)
-                    sessions[sid]["state"] = res
-                    await process_outbox(websocket, sid)
-                except Exception as e:
-                    import traceback
-                    logger.error(f"Error in LangGraph matching (voice/finished): {e}")
-                    traceback.print_exc()
+                    assist_text = "".join(session_data.get("assist_buffer", [])).strip()
+                    if assist_text:
+                        current_state["messages"].append({"role": "assistant", "text": assist_text})
+                        session_data["assist_buffer"] = []
+
+                    full_transcript = " ".join(session_data["user_transcripts"]).strip()
+                    if not full_transcript:
+                        return
+                    session_data["user_transcripts"] = []
+                    
+                    await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
+                    
+                    current_state["transcript"] = full_transcript
+                    current_state["mode"] = "voice"
+                    current_state["messages"].append({"role": "user", "text": full_transcript})
+                    
+                    await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
+                    
+                    try:
+                        res = await asyncio.to_thread(app_graph.invoke, current_state)
+                        sessions[sid]["state"] = res
+                        await process_outbox(websocket, sid)
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"Error in LangGraph matching (voice/finished): {e}")
+                        traceback.print_exc()
+                finally:
+                    session_data["handling_finished"] = False
                 
             if msg_type == "client.audio.start":
                 # Allow audio input regardless of current mode - mode will be set to "voice" when transcript is ready
@@ -352,5 +376,9 @@ async def websocket_endpoint(websocket: WebSocket):
             if sessions[session_id].get("sonic"):
                 asyncio.create_task(sessions[session_id]["sonic"].end_session())
             del sessions[session_id]
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
