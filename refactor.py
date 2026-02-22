@@ -1,4 +1,6 @@
+import os
 
+GRAPH_PY = """
 import os
 from typing import Dict, Any, List, Optional, TypedDict
 from langgraph.graph import StateGraph, START, END
@@ -63,13 +65,13 @@ def interpret_intent(state: AgentState):
                         lc_messages.append(HumanMessage(content=msg.get("text", "")))
                         
             current_prompt = (
-                "Extract mortgage details from the following user transcript. \n"
-                "STRICT RULES:\n"
-                "1. Only set existingCustomer if the user definitively confirms they bank with Barclays.\n"
-                "2. Only set propertySeen if the user definitively says they have found a property.\n"
-                "3. If the user just says 'Hi' or generic greetings, do NOT extract values for these fields; leave them as null.\n"
-                "4. Do NOT assume or guess based on conversational flow.\n\n"
-                f"Current Intent: {intent}\nTranscript: {transcript}"
+                "Extract mortgage details from the following user transcript. \\n"
+                "STRICT RULES:\\n"
+                "1. Only set existingCustomer if the user definitively confirms they bank with Barclays.\\n"
+                "2. Only set propertySeen if the user definitively says they have found a property.\\n"
+                "3. If the user just says 'Hi' or generic greetings, do NOT extract values for these fields; leave them as null.\\n"
+                "4. Do NOT assume or guess based on conversational flow.\\n\\n"
+                f"Current Intent: {intent}\\nTranscript: {transcript}"
             )
             lc_messages.append(HumanMessage(content=current_prompt))
             
@@ -106,8 +108,7 @@ def render_missing_inputs(state: AgentState):
     intent = state.get("intent", {})
     missing = []
     
-    if not intent.get("category"): missing.append("category")
-    elif intent.get("existingCustomer") is None: missing.append("whether you already bank with Barclays")
+    if intent.get("existingCustomer") is None: missing.append("whether you already bank with Barclays")
     elif intent.get("propertySeen") is None: missing.append("if you have already found a property")
     elif not intent.get("propertyValue"): missing.append("property value")
     elif not intent.get("loanBalance"): missing.append("loan balance")
@@ -116,105 +117,69 @@ def render_missing_inputs(state: AgentState):
     outbox = list(state.get("outbox", []))
     messages = list(state.get("messages", []))
     
-    # Map each missing field to a short, single-sentence question.
-    # When a category was just selected, prefix with a brief acknowledgment.
-    category = state.get("intent", {}).get("category", "a mortgage")
-    just_selected = state.get("pendingAction", {}) and state.get("pendingAction", {}).get("data", {}).get("action") == "select_category"
-    
     if missing:
-        if missing[0] == "category":
-            # Landing screen — no voice prompt, the visual grid is enough
-            pass
-        else:
-            first_question_map = {
-                "whether you already bank with Barclays": "Do you already bank with Barclays?",
-                "if you have already found a property": "Have you already found a property?",
-                "property value": "What is the property value?",
-                "loan balance": "How much do you need to borrow?",
-                "fixed term (years)": "How many years do you want to fix — 2, 3, 5, or 10?",
-            }
-            q = first_question_map.get(missing[0], f"Can you tell me your {missing[0]}?")
-            
-            if just_selected:
-                msg = f"Great, I can help you with a {category} mortgage. {q}"
-            else:
-                msg = q
-            
-            outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-            messages.append({"role": "assistant", "text": msg})
+        msg = f"Can you tell me your {missing[0]}?"
         
-    intent = state.get("intent", {})
-    category = intent.get("category")
-    
-    if not category:
-        try:
-            with open("/Users/jamescregeen/A2UI_S2S/ftb_b64.txt", "r") as f: ftb_icon = f.read().strip()
-            with open("/Users/jamescregeen/A2UI_S2S/remortgage_b64.txt", "r") as f: remortgage_icon = f.read().strip()
-            with open("/Users/jamescregeen/A2UI_S2S/btl_b64.txt", "r") as f: btl_icon = f.read().strip()
-            with open("/Users/jamescregeen/A2UI_S2S/moving_b64.txt", "r") as f: moving_icon = f.read().strip()
-        except:
-            ftb_icon = remortgage_icon = btl_icon = moving_icon = ""
-
-        components = [
-            {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
-            {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
-            {"id": "options_grid", "component": "Column", "children": ["row_1", "row_2"]},
-            {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
-            {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
-            {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
-            {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
-            {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
-            {"id": "opt_remortgage", "component": "Column", "children": ["img_remortgage", "btn_remortgage"]},
-            {"id": "img_remortgage", "component": "Image", "data": {"url": f"data:image/png;base64,{remortgage_icon}"}, "text": "Remortgage"},
-            {"id": "btn_remortgage", "component": "Button", "text": "Remortgage", "data": {"action": "select_category", "category": "Remortgage"}},
-            {"id": "opt_btl", "component": "Column", "children": ["img_btl", "btn_btl"]},
-            {"id": "img_btl", "component": "Image", "data": {"url": f"data:image/png;base64,{btl_icon}"}, "text": "BTL"},
-            {"id": "btn_btl", "component": "Button", "text": "Buy-to-let", "data": {"action": "select_category", "category": "Buy-to-let"}},
-            {"id": "opt_moving", "component": "Column", "children": ["img_moving", "btn_moving"]},
-            {"id": "img_moving", "component": "Image", "data": {"url": f"data:image/png;base64,{moving_icon}"}, "text": "Moving"},
-            {"id": "btn_moving", "component": "Button", "text": "Moving home", "data": {"action": "select_category", "category": "Moving home"}}
-        ]
-        payload = {"version": "v0.9", "updateComponents": {"surfaceId": "main", "components": components}}
-        outbox.append({"type": "server.a2ui.patch", "payload": payload})
-        ui_state = dict(state.get("ui", {}))
-        ui_state["state"] = "LOADING"
-        return {"outbox": outbox, "ui": ui_state, "messages": messages, "transcript": ""}
+        if os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_PROFILE"):
+            try:
+                from langchain_aws import ChatBedrockConverse
+                from langchain_core.messages import HumanMessage, SystemMessage
+                
+                model_id = os.getenv("AGENT_MODEL_ID", "amazon.nova-lite-v1:0")
+                llm = ChatBedrockConverse(
+                    model=model_id, 
+                    region_name=os.getenv("AWS_REGION", "us-east-1")
+                )
+                lc_messages = [SystemMessage(content=(
+                    f"You are Barclays Mortgage Assistant. The user is missing: {missing[0]}. "
+                    "Ask them conversationally for this detail. Keep it very short, 1-2 sentences."
+                ))]
+                for m in state.get("messages", []):
+                    lc_messages.append(HumanMessage(content=str(m.get("text", ""))))
+                
+                response = llm.invoke(lc_messages)
+                msg_content = response.content
+                if isinstance(msg_content, list) and len(msg_content) > 0 and isinstance(msg_content[0], dict):
+                    msg = str(msg_content[0].get("text", msg_content))
+                else:
+                    msg = str(msg_content)
+            except Exception as e:
+                print(f"LLM generation failed, falling back: {e}")
         
-    pv = intent.get("propertyValue")
-    lb = intent.get("loanBalance")
-    fy = intent.get("fixYears")
-    
-    pv_text = f"£{pv:,}" if pv else "Pending..."
-    lb_text = f"£{lb:,}" if lb else "Pending..."
-    fy_text = f"{fy} Years" if fy else "Pending..."
+        outbox.append({"type": "server.transcript.final", "payload": {"text": msg, "role": "assistant"}})
+        outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+        messages.append({"role": "assistant", "text": msg})
+        
+    try:
+        with open("/Users/jamescregeen/A2UI_S2S/ftb_b64.txt", "r") as f: ftb_icon = f.read().strip()
+        with open("/Users/jamescregeen/A2UI_S2S/remortgage_b64.txt", "r") as f: remortgage_icon = f.read().strip()
+        with open("/Users/jamescregeen/A2UI_S2S/btl_b64.txt", "r") as f: btl_icon = f.read().strip()
+        with open("/Users/jamescregeen/A2UI_S2S/moving_b64.txt", "r") as f: moving_icon = f.read().strip()
+    except Exception:
+        ftb_icon = remortgage_icon = btl_icon = moving_icon = ""
 
-    # Determine which field the agent is currently asking about (first missing one)
-    next_missing = missing[0] if missing else None
-    
-    pv_focus = next_missing in ("property value",)
-    lb_focus = next_missing in ("loan balance",)
-    fy_focus = next_missing in ("fixed term (years)",)
-    
-    # Existing-customer / propertySeen are asked verbally only, no dedicated field row
-    # But we can show all three rows always, highlighting the relevant one.
-    category_label = f"[{category}]" if category else ""
-    
     components = [
-        {"id": "root", "component": "Column", "children": ["header", "details_col"]},
-        {"id": "header", "component": "Text", "text": f"Let\u2019s build your quote {category_label}", "variant": "h2"},
-        {"id": "details_col", "component": "Column", "children": ["row_pv", "row_lb", "row_fy"]},
-        
-        {"id": "row_pv", "component": "Row", "children": ["lbl_pv", "val_pv"]},
-        {"id": "lbl_pv", "component": "Text", "text": "Property Value:", "variant": "h3", "focus": pv_focus},
-        {"id": "val_pv", "component": "Text", "text": pv_text, "variant": "body", "focus": pv_focus},
-        
-        {"id": "row_lb", "component": "Row", "children": ["lbl_lb", "val_lb"]},
-        {"id": "lbl_lb", "component": "Text", "text": "Loan Balance:", "variant": "h3", "focus": lb_focus},
-        {"id": "val_lb", "component": "Text", "text": lb_text, "variant": "body", "focus": lb_focus},
-        
-        {"id": "row_fy", "component": "Row", "children": ["lbl_fy", "val_fy"]},
-        {"id": "lbl_fy", "component": "Text", "text": "Fixed Term:", "variant": "h3", "focus": fy_focus},
-        {"id": "val_fy", "component": "Text", "text": fy_text, "variant": "body", "focus": fy_focus},
+        {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
+        {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
+        {
+            "id": "options_grid", 
+            "component": "Column", 
+            "children": ["row_1", "row_2"]
+        },
+        {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
+        {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
+        {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
+        {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
+        {"id": "btn_ftb", "component": "Button", "text": "First-time buyer"},
+        {"id": "opt_remortgage", "component": "Column", "children": ["img_remortgage", "btn_remortgage"]},
+        {"id": "img_remortgage", "component": "Image", "data": {"url": f"data:image/png;base64,{remortgage_icon}"}, "text": "Remortgage"},
+        {"id": "btn_remortgage", "component": "Button", "text": "Remortgage"},
+        {"id": "opt_btl", "component": "Column", "children": ["img_btl", "btn_btl"]},
+        {"id": "img_btl", "component": "Image", "data": {"url": f"data:image/png;base64,{btl_icon}"}, "text": "BTL"},
+        {"id": "btn_btl", "component": "Button", "text": "Buy-to-let"},
+        {"id": "opt_moving", "component": "Column", "children": ["img_moving", "btn_moving"]},
+        {"id": "img_moving", "component": "Image", "data": {"url": f"data:image/png;base64,{moving_icon}"}, "text": "Moving"},
+        {"id": "btn_moving", "component": "Button", "text": "Moving home"}
     ]
     
     payload = {
@@ -225,7 +190,8 @@ def render_missing_inputs(state: AgentState):
         }
     }
     
-    outbox.append({"type": "server.a2ui.patch", "payload": payload})
+    if state.get("ui", {}).get("state") != "LOADING":
+        outbox.append({"type": "server.a2ui.patch", "payload": payload})
         
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "LOADING" # Meaning it's incomplete
@@ -284,9 +250,8 @@ def render_products_a2ui(state: AgentState):
     messages = list(state.get("messages", []))
     if state.get("ui", {}).get("state") != "COMPARISON":
         msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options."
-        if state.get("mode") != "voice":
-            outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-            messages.append({"role": "assistant", "text": msg})
+        outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+        messages.append({"role": "assistant", "text": msg})
     
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
@@ -330,15 +295,13 @@ def handle_ui_action(state: AgentState):
     
     action_id = action.get("id")
     data = action.get("data", {})
-    if isinstance(data, dict) and data.get("action"):
-        action_id = data.get("action")
     
     intent = dict(state.get("intent", {}))
     selection = dict(state.get("selection", {}))
     
     if action_id == "reset_flow":
         return {
-            "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None},
+            "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25},
             "selection": {},
             "products": [],
             "ltv": 0.0,
@@ -347,11 +310,6 @@ def handle_ui_action(state: AgentState):
             "existing_customer": None,
             "property_seen": None
         }
-    elif action_id == "select_category":
-        category = data.get("category")
-        intent["category"] = category
-        # No voice here — render_missing_inputs will emit the combined greeting+first question
-        return {"intent": intent}
     elif action_id == "update_term":
         intent["termYears"] = data.get("termYears", intent.get("termYears", 25))
         selection["termYears"] = intent["termYears"]
@@ -443,17 +401,13 @@ def ui_action_router(state: AgentState):
     if not action:
         return END
     action_id = action.get("id")
-    data = action.get("data", {})
-    # Allow button data to override the action id (e.g. btn_ftb has data.action = "select_category")
-    if isinstance(data, dict) and data.get("action"):
-        action_id = data.get("action")
     if action_id == "update_term":
         return "recalculate_and_patch"
     elif action_id == "select_product":
         return "render_summary_a2ui"
     elif action_id == "confirm_application":
         return "confirm_application"
-    elif action_id in ("reset_flow", "select_category"):
+    elif action_id == "reset_flow":
         return "render_missing_inputs"
     return END
 
@@ -462,11 +416,7 @@ def start_router(state: AgentState):
         return "handle_ui_action"
     if state.get("transcript"):
         return "interpret_intent"
-    
-    intent = state.get("intent", {})
-    if not intent.get("category") or intent.get("propertyValue") is None or intent.get("loanBalance") is None or intent.get("fixYears") is None:
-        return "render_missing_inputs"
-    return "call_mortgage_tools"
+    return END
 
 def intent_router(state: AgentState):
     intent = state.get("intent", {})
@@ -505,3 +455,9 @@ workflow.add_edge("confirm_application", "clear_pending_action")
 workflow.add_edge("clear_pending_action", END)
 
 app_graph = workflow.compile()
+"""
+
+with open("/Users/jamescregeen/A2UI_S2S/server/app/agent/graph.py", "w") as f:
+    f.write(GRAPH_PY)
+
+print("graph.py fully rewritten!")

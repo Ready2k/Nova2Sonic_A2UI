@@ -62,18 +62,26 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         {children}
                     </div>
                 );
-            case 'Text':
-                const variantClasses = {
-                    h1: 'text-3xl font-black text-blue-950 tracking-tight',
-                    h2: 'text-2xl font-black text-blue-950 tracking-tight border-b border-blue-100 pb-2 mb-2',
-                    h3: 'text-xl font-bold text-gray-900',
-                    body: 'text-sm text-gray-600 leading-relaxed',
+            case 'Text': {
+                const baseVariant = {
+                    h1: 'text-3xl font-black tracking-tight',
+                    h2: 'text-2xl font-black tracking-tight border-b border-blue-100 pb-2 mb-2',
+                    h3: 'text-xl font-bold',
+                    body: 'text-sm leading-relaxed',
                 }[component.variant || 'body'];
+                const focusClasses = (component as any).focus
+                    ? 'text-blue-600 animate-pulse'
+                    : component.variant === 'h1' || component.variant === 'h2'
+                        ? 'text-blue-950'
+                        : component.variant === 'h3'
+                            ? 'text-gray-900'
+                            : 'text-gray-600';
                 return (
-                    <p key={id} className={variantClasses}>
+                    <p key={id} className={`${baseVariant} ${focusClasses} transition-colors duration-300`}>
                         {component.text}
                     </p>
                 );
+            }
             case 'Gauge':
                 const ltv = component.value || 0;
                 return (

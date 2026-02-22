@@ -39,10 +39,12 @@ def create_initial_state() -> AgentState:
         "ltv": 0.0,
         "products": [],
         "selection": {},
+        "ui": {"surfaceId": "main", "state": "LOADING"},
         "errors": None,
+        "pendingAction": None,
+        "outbox": [],
         "existing_customer": None,
-        "property_seen": None,
-        "last_event": None
+        "property_seen": None
     }
 
 async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload: dict = None):
@@ -51,6 +53,60 @@ async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload
         await websocket.send_text(msg.model_dump_json())
     except Exception as e:
         logger.error(f"Cannot send to ws: {e}")
+
+async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: str):
+    """Run Node TTS synchronously (awaited) so the WS stays open for the full audio stream."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "node", "nova_sonic_tts.mjs", text_to_speak,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=os.path.dirname(os.path.dirname(__file__))
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if not line: break
+            decoded = line.decode().strip()
+            if decoded.startswith("AUDIO_CHUNK:"):
+                await send_msg(websocket, session_id, "server.voice.audio", {"data": decoded.split("AUDIO_CHUNK:")[1]})
+        await proc.wait()
+    except Exception as e:
+        logger.error(f"TTS fallback failed: {e}")
+    finally:
+        if session_id in sessions:
+            sessions[session_id]["voice_playing"] = False
+        await send_msg(websocket, session_id, "server.voice.stop", {})
+
+
+async def process_outbox(websocket: WebSocket, sid: str):
+    state = sessions[sid]["state"]
+    outbox = state.get("outbox", [])
+    sonic_active = sessions[sid].get("sonic") is not None
+    
+    # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
+    for event in outbox:
+        if event["type"] != "server.voice.say":
+            logger.info(f"Emitting from outbox: {event['type']}")
+            await send_msg(websocket, sid, event["type"], event.get("payload"))
+
+    # Pass 2: handle voice.say last
+    for event in outbox:
+        if event["type"] == "server.voice.say":
+            text_to_speak = event.get("payload", {}).get("text", "")
+            logger.info(f"Emitting from outbox: server.voice.say -> '{text_to_speak[:60]}'")
+            # Echo to chat transcript immediately
+            await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
+            
+            if sonic_active:
+                # Nova Sonic handles speaking — don't compete with a separate TTS process
+                logger.info(f"Skipping TTS (Nova Sonic active)")
+            elif not sessions[sid].get("voice_playing"):
+                # No active voice session — fire TTS as background task (non-blocking)
+                sessions[sid]["voice_playing"] = True
+                asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
+    
+    # Clear outbox
+    state["outbox"] = []
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -68,11 +124,14 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await send_msg(websocket, session_id, "server.ready")
         
-        # Trigger initial UI rendering (Mortgage Options Dashboard)
+        # Trigger initial UI rendering (landing category screen)
+        # Strip all voice.say — the landing grid is visual-only.
+        # First voice fires when the user clicks a category button.
         initial_res = await asyncio.to_thread(app_graph.invoke, sessions[session_id]["state"])
+        # Suppress any voice on initial load to avoid double-audio from React StrictMode remounts
+        initial_res["outbox"] = [e for e in initial_res.get("outbox", []) if e["type"] != "server.voice.say"]
         sessions[session_id]["state"] = initial_res
-        if initial_res.get("a2ui_payload"):
-            await send_msg(websocket, session_id, "server.a2ui.patch", initial_res["a2ui_payload"])
+        await process_outbox(websocket, session_id)
         
         while True:
             data = await websocket.receive_text()
@@ -95,6 +154,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if msg_type in ["client.audio.start", "client.audio.stop"]:
                 logger.info(f"--- Received '{msg_type}' from {sid} ---")
 
+            # Inline helpers for Nova Sonic callbacks
             async def handle_audio_chunk(chunk_b64):
                 await send_msg(websocket, sid, "server.voice.audio", {"data": chunk_b64})
 
@@ -103,48 +163,40 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"APPENDING USER TEXT: {text}", file=sys.stderr, flush=True)
                     session_data["user_transcripts"].append(text)
                 else:
-                    # Echo Assistant's real-time transcript to the UI
-                    # We store it temporarily so we can append the full message later
                     if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
                     session_data["assist_buffer"].append(text)
                     await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
 
             async def handle_finished():
-                # Turn ending. Get assistant's full text if any
+                # ALWAYS read the latest state — never use the stale closure variable
+                current_state = sessions[sid]["state"]
+                
                 assist_text = "".join(session_data.get("assist_buffer", [])).strip()
                 if assist_text:
-                    state["messages"].append({"role": "assistant", "text": assist_text})
+                    current_state["messages"].append({"role": "assistant", "text": assist_text})
                     session_data["assist_buffer"] = []
 
                 full_transcript = " ".join(session_data["user_transcripts"]).strip()
                 if not full_transcript:
-                    # If we only have assistant text but no new user transcript, 
-                    # we still might want to re-run graph to update UI state, 
-                    # but usually unnecessary unless the graph depends on history.
                     return
                 session_data["user_transcripts"] = []
                 
                 await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
                 
-                state["transcript"] = full_transcript
-                state["mode"] = "voice"
-                state["messages"].append({"role": "user", "text": full_transcript})
+                current_state["transcript"] = full_transcript
+                current_state["mode"] = "voice"
+                current_state["messages"].append({"role": "user", "text": full_transcript})
                 
                 await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
                 
                 try:
-                    res = await asyncio.to_thread(app_graph.invoke, state)
+                    res = await asyncio.to_thread(app_graph.invoke, current_state)
                     sessions[sid]["state"] = res
-                    
-                    a2ui_payload = res.get("a2ui_payload")
-                    if a2ui_payload:
-                        await send_msg(websocket, sid, "server.agent.thinking", {"state": "rendering_ui"})
-                        await send_msg(websocket, sid, "server.a2ui.patch", a2ui_payload)
+                    await process_outbox(websocket, sid)
                 except Exception as e:
                     import traceback
                     logger.error(f"Error in LangGraph matching (voice/finished): {e}")
                     traceback.print_exc()
-
                 
             if msg_type == "client.audio.start":
                 sonic = NovaSonicSession(
@@ -153,7 +205,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     on_finished=handle_finished
                 )
                 
-                # Replace the original process_responses to also emit on_user_transcript
                 original_process = sonic._process_responses
                 async def patched_process():
                     try:
@@ -184,7 +235,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     sonic.display_assistant_text = True
                                                 else:
                                                     sonic.display_assistant_text = False
-
                                         elif 'textOutput' in event:
                                             text = event['textOutput']['content']    
                                             if sonic.role == "ASSISTANT" and sonic.display_assistant_text:
@@ -192,27 +242,19 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     await sonic.on_text_chunk(text)
                                             elif sonic.role == "USER":
                                                 await handle_text_chunk(text, True)
-                                                
                                         elif 'audioOutput' in event:
                                             audio_content = event['audioOutput']['content']
                                             if sonic.on_audio_chunk:
                                                 await sonic.on_audio_chunk(audio_content)
-                                                
                                         elif 'contentEnd' in event:
-                                            # Bedrock streams don't emit a promptEnd turn for the user. They emit contentEnd.
-                                            # We must invoke the LangGraph A2UI update sequence when the user finishes speaking.
                                             if sonic.role == "USER":
                                                 await handle_finished()
-
                                         elif 'promptEnd' in event:
-                                            # Assistant turn finished. Update state with buffer.
                                             await handle_finished()
                                             
                             if result is None or getattr(result, 'value', None) is None:
-                                # Catch stream closure just in case promptEnd isn't sent
                                 await handle_finished()
                                 break
-
                     except Exception as e:
                         import traceback
                         print(f"Nova Sonic Process Response Error: {e}", file=sys.stderr, flush=True)
@@ -229,23 +271,30 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not aws_access_key:
                         logger.warning("AWS Credentials not found. Nova Sonic will fail.")
                     
-                    # Compute what's missing to guide the voice model
-                    intent = state.get("intent", {})
-                    missing = []
-                    if intent.get("existingCustomer") is None: missing.append("if they bank with Barclays")
-                    if intent.get("propertySeen") is None: missing.append("if they found a property")
-                    if not intent.get("propertyValue"): missing.append("property value")
-                    if not intent.get("loanBalance"): missing.append("loan balance")
-                    if not intent.get("fixYears"): missing.append("fixed term years (2, 5, 10)")
+                    # Build a tight system prompt from the LATEST state (not stale closure)
+                    current_intent = sessions[sid]["state"].get("intent", {})
+                    category = current_intent.get("category", "a mortgage")
+                    missing_prompt_parts = []
+                    if current_intent.get("existingCustomer") is None:
+                        missing_prompt_parts.append("whether they already bank with Barclays (answer: yes or no)")
+                    elif current_intent.get("propertySeen") is None:
+                        missing_prompt_parts.append("whether they have found a property yet (answer: yes or no)")
+                    elif not current_intent.get("propertyValue"):
+                        missing_prompt_parts.append("the property value in pounds (e.g. 400000)")
+                    elif not current_intent.get("loanBalance"):
+                        missing_prompt_parts.append("the loan amount they need in pounds")
+                    elif not current_intent.get("fixYears"):
+                        missing_prompt_parts.append("how many years they want to fix: 2, 3, 5, or 10")
                     
-                    needed = ", ".join(missing) if missing else "nothing (all info gathered)"
+                    next_question = missing_prompt_parts[0] if missing_prompt_parts else "confirm they are happy to proceed"
                     
                     sys_prompt = (
-                        "You are Barclays Mortgage Assistant. Your goal is to gather mortgage details conversationally. "
-                        "IMPORTANT: The backend system currently needs: " + needed + ". "
-                        "Prioritize asking for one of these missing items. Keep it very short (1-2 sentences). "
-                        "If you already have enough info, say you've found some options and refer to the screen. "
-                        "DO NOT say 'One moment' or 'I will retrieve details'. You do not have tools. Just talk."
+                        f"You are a Barclays mortgage advisor. The customer is enquiring about: {category}. "
+                        "RULES (follow exactly): "
+                        "1. Respond with ONE sentence only. No lists, no explanations. "
+                        "2. Do not greet or introduce yourself. "
+                        f"3. Ask only for: {next_question}. "
+                        "4. After asking, stop and wait for the answer."
                     )
                     await sonic.start_session(system_prompt=sys_prompt)
                     await sonic.start_audio_input()
@@ -280,7 +329,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 state["transcript"] = transcript
                 state["mode"] = "text"
-                state["last_event"] = "text"
                 
                 msg_obj = {"role": "user", "text": transcript}
                 if image_b64:
@@ -294,120 +342,30 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     res = await asyncio.to_thread(app_graph.invoke, state)
                     sessions[sid]["state"] = res
-                    
-                    # Directly emit the A2UI payload generated by the graph node
-                    a2ui_payload = res.get("a2ui_payload")
-                    if a2ui_payload:
-                        await send_msg(websocket, sid, "server.agent.thinking", {"state": "rendering_ui"})
-                        await send_msg(websocket, sid, "server.a2ui.patch", a2ui_payload)
+                    await process_outbox(websocket, sid)
                 except Exception as e:
                     import traceback
                     logger.error(f"Error in LangGraph matching (text): {e}")
                     traceback.print_exc()
-                    res = state # Fallback to current state
-
-                intent = res.get("intent", {})
-                missing = []
-                # Baseline questions first
-                if intent.get("existingCustomer") is None: missing.append("whether you already bank with Barclays")
-                if intent.get("propertySeen") is None: missing.append("if you have already found a property")
-                # Then financial/requirement questions
-                if not intent.get("propertyValue"): missing.append("property value")
-                if not intent.get("loanBalance"): missing.append("loan balance")
-                if not intent.get("fixYears"): missing.append("fixed term (years)")
-                
-                if not missing:
-                    ltv = res.get("ltv", 0)
-                    msg = f"Based on a {ltv}% LTV, I’ve found two {intent.get('fixYears')}-year options."
-                else:
-                    await send_msg(websocket, sid, "server.agent.thinking", {"state": "generating_response"})
-                    try:
-                        from langchain_aws import ChatBedrockConverse
-                        from langchain_core.messages import HumanMessage, SystemMessage
-                        
-                        model_id = os.getenv("AGENT_MODEL_ID", "amazon.nova-lite-v1:0")
-                        llm = ChatBedrockConverse(
-                            model=model_id, 
-                            region_name=os.getenv("AWS_REGION", "us-east-1")
-                        )
-                        lc_messages = [SystemMessage(content=(
-                            f"You are Barclays Mortgage Assistant. The user is missing: {', '.join(missing)}. "
-                            "Prioritize asking about banking status and property search before financial details. "
-                            "Ask them conversationally for ONE of these missing details. Keep it very short, 1-2 sentences."
-                        ))]
-                        for m in state["messages"]:
-                            lc_messages.append(HumanMessage(content=str(m.get("text", ""))))
-                        
-                        response = await asyncio.to_thread(llm.invoke, lc_messages)
-                        msg_content = response.content
-                        if isinstance(msg_content, list) and len(msg_content) > 0 and isinstance(msg_content[0], dict):
-                            msg = str(msg_content[0].get("text", msg_content))
-                        else:
-                            msg = str(msg_content)
-                    except Exception as e:
-                        print(f"Text mode LLM fallback failed: {e}")
-                        msg = f"Can you tell me your {missing[0]}?"
-                        
-                    # Echo the assistant's request so the text UI shows it
-                    state["messages"].append({"role": "assistant", "text": msg})
-                    await send_msg(websocket, sid, "server.transcript.final", {"text": msg, "role": "assistant"})
-                    await send_msg(websocket, sid, "server.agent.thinking", {"state": "waiting_for_user"})
-                
-                if not session_data.get("voice_playing"):
-                    session_data["voice_playing"] = True
-                    async def run_tts(session_id, text_to_speak):
-                        try:
-                            proc = await asyncio.create_subprocess_exec(
-                                "node", "nova_sonic_tts.mjs", text_to_speak,
-                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                                cwd=os.path.dirname(os.path.dirname(__file__)) 
-                            )
-                            while True:
-                                line = await proc.stdout.readline()
-                                if not line: break
-                                decoded = line.decode().strip()
-                                if decoded.startswith("AUDIO_CHUNK:"):
-                                    await send_msg(websocket, session_id, "server.voice.audio", {"data": decoded.split("AUDIO_CHUNK:")[1]})
-                            await proc.wait()
-                        except: pass
-                        finally:
-                            if session_id in sessions:
-                                sessions[session_id]["voice_playing"] = False
-                                sessions[session_id]["tts_task"] = None
-                            await send_msg(websocket, session_id, "server.voice.stop")
-                    session_data["tts_task"] = asyncio.create_task(run_tts(sid, msg))
                     
             elif msg_type == "client.ui.action":
                 action_id = payload.get("id")
                 data = payload.get("data", {})
                 
                 logger.info(f"Received UI Action: {action_id} with data: {data}")
-                state["last_event"] = "action"
                 
-                if action_id == "select_product":
-                    state["selection"] = data
-                elif action_id == "update_term":
-                    state["intent"]["termYears"] = data.get("termYears", state["intent"]["termYears"])
-                elif action_id == "confirm_application":
-                    state["selection"]["confirmed"] = True
-                elif action_id == "reset_flow":
-                    # Simple reset logic
-                    state["intent"] = {}
-                    state["selection"] = {}
-                    state["products"] = []
-                
-                # Re-invoke graph with updated state
-                res = await asyncio.to_thread(app_graph.invoke, state)
-                sessions[sid]["state"] = res
-                
-                # Emit update
-                a2ui_payload = res.get("a2ui_payload")
-                if a2ui_payload:
-                    await send_msg(websocket, sid, "server.a2ui.patch", a2ui_payload)
-                
-                # Optional vocal confirmation
-                if action_id == "select_product":
-                    asyncio.create_task(run_tts(sid, "Great choice. I've prepared your summary. Would you like to proceed with the Agreement in Principle?"))
+                try:
+                    # Always use latest state (stale closure guard)
+                    current_state = sessions[sid]["state"]
+                    current_state["pendingAction"] = {"id": action_id, "data": data}
+                    
+                    res = await asyncio.to_thread(app_graph.invoke, current_state)
+                    sessions[sid]["state"] = res
+                    await process_outbox(websocket, sid)
+                except Exception as e:
+                    import traceback
+                    logger.error(f"Error handling UI action '{action_id}': {e}")
+                    traceback.print_exc()
                 
     except WebSocketDisconnect:
         if session_id in sessions:
