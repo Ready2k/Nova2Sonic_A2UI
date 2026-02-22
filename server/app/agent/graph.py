@@ -236,7 +236,8 @@ def render_missing_inputs(state: AgentState):
     category_label = f"[{category}]" if category else ""
     
     components = [
-        {"id": "root", "component": "Column", "children": ["header", "details_col"]},
+        {"id": "root", "component": "Column", "children": ["journey", "header", "details_col"]},
+        {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 1}},
         {"id": "header", "component": "Text", "text": f"Let\u2019s build your quote {category_label}", "variant": "h2"},
         {"id": "details_col", "component": "Column", "children": ["row_addr", "row_pv", "row_lb", "row_fy"]},
         
@@ -276,12 +277,31 @@ def render_missing_inputs(state: AgentState):
             logger.error(f"Geocoding error: {e}")
 
     if addr:
+        # Insights only show if we have an address
+        insights = [
+            {"label": "Energy Rating", "value": "EPC: B (Verified)"},
+            {"label": "Council Tax", "value": "Band D (\u00a31,840/yr)"}
+        ]
+        components.insert(2, {"id": "prop_insights", "component": "DataCard", "data": {"items": insights}})
+        components[0]["children"].insert(2, "prop_insights")
+
+        # Green Mortgage Showcase
+        components.insert(3, {
+            "id": "green_reward", 
+            "component": "BenefitCard", 
+            "variant": "Green Home Reward",
+            "text": "You qualify for \u00a3250 Cashback",
+            "data": {"detail": "Because this property has an EPC rating of B, you're eligible for our Green Home mortgage reward."}
+        })
+        components[0]["children"].insert(3, "green_reward")
+        
+        # Add map
         map_data = {"address": addr}
         if lat and lng:
             map_data.update({"lat": lat, "lng": lng})
         
-        components.insert(1, {"id": "map_view", "component": "Map", "text": addr, "data": map_data})
-        components[0]["children"].insert(1, "map_view")
+        components.insert(3, {"id": "map_view", "component": "Map", "text": addr, "data": map_data})
+        components[0]["children"].insert(3, "map_view")
     
     payload = {
         "version": "v0.9",
@@ -294,9 +314,9 @@ def render_missing_inputs(state: AgentState):
     new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
         
     ui_state = dict(state.get("ui", {}))
-    ui_state["state"] = "LOADING" # Meaning it's incomplete
+    ui_state["state"] = "LOADING" 
     
-    return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
+    return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "intent": intent}
 
 def call_mortgage_tools(state: AgentState):
     intent = state.get("intent", {})
@@ -324,8 +344,9 @@ def render_products_a2ui(state: AgentState):
     new_messages = []
 
     components = [
-        {"id": "root", "component": "Column", "children": ["header_text"]}
+        {"id": "root", "component": "Column", "children": ["journey", "header_text"]}
     ]
+    components.append({"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 2}})
     components.append({"id": "header_text", "component": "Text", "text": "Your Comparative Analysis", "variant": "h2"})
 
     if ltv > 0:
@@ -333,10 +354,21 @@ def render_products_a2ui(state: AgentState):
         components.append({"id": "ltv_gauge", "component": "Gauge", "value": ltv, "max": 100})
 
     if products:
+        components[0]["children"].append("market_insight")
+        components.append({"id": "market_insight", "component": "ComparisonBadge", "text": "Market Leading: These rates are in the top 5% for your LTV tier"})
+
         components[0]["children"].append("products_row")
         components.append({"id": "products_row", "component": "Row", "children": [f"prod_{i}" for i in range(len(products))]})
         for i, p in enumerate(products):
             components.append({"id": f"prod_{i}", "component": "ProductCard", "data": p})
+
+        # Add a final breakdown card
+        breakdown = [
+            {"label": "Capital Repayment", "value": f"\u00a3{int((products[0].get('monthlyPayment', 0)) * 0.4):,} (Est.)"},
+            {"label": "Interest Portion", "value": f"\u00a3{int((products[0].get('monthlyPayment', 0)) * 0.6):,} (Est.)"}
+        ]
+        components[0]["children"].append("pmt_breakdown")
+        components.append({"id": "pmt_breakdown", "component": "DataCard", "data": {"items": breakdown}})
             
     payload = {
         "version": "v0.9",
@@ -443,11 +475,12 @@ def render_summary_a2ui(state: AgentState):
     new_messages = []
     
     components = [
-        {"id": "root", "component": "Column", "children": ["summary_header", "summary_card", "disclaimer", "aip_button"]},
+        {"id": "root", "component": "Column", "children": ["journey", "summary_header", "summary_card", "disclaimer", "aip_button"]},
+        {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 3}},
         {"id": "summary_header", "component": "Text", "text": "Your Agreement in Principle (AiP)", "variant": "h2"},
         {"id": "summary_card", "component": "ProductCard", "data": selected_prod or (products[0] if products else {})},
         {"id": "disclaimer", "component": "Text", "text": "Your home may be repossessed if you do not keep up repayments on your mortgage. Overall cost for comparison: 5.6% APRC Representative.", "variant": "body"},
-        {"id": "aip_button", "component": "Button", "text": "Confirm Application", "action": "confirm_application"}
+        {"id": "aip_button", "component": "Button", "text": "Confirm Application", "data": {"action": "confirm_application"}}
     ]
     
     payload = {
@@ -472,9 +505,10 @@ def confirm_application(state: AgentState):
     new_outbox = []
     new_messages = []
     components = [
-        {"id": "root", "component": "Column", "children": ["confirmed_header", "reset_button"]},
+        {"id": "root", "component": "Column", "children": ["journey", "confirmed_header", "reset_button"]},
+        {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 4}},
         {"id": "confirmed_header", "component": "Text", "text": "Application Started", "variant": "h1"},
-        {"id": "reset_button", "component": "Button", "text": "Reset Flow", "action": "reset_flow"}
+        {"id": "reset_button", "component": "Button", "text": "Reset Flow", "data": {"action": "reset_flow"}}
     ]
     payload = {
         "version": "v0.9",

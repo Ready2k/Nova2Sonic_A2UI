@@ -239,6 +239,23 @@ export default function Home() {
             {/* Decorative background circle */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-blue-50/50 rounded-full blur-3xl pointer-events-none -z-10"></div>
             <A2Renderer a2uiState={a2uiState} onAction={sendAction} />
+
+            {/* Call an Expert FAB (Show once we have context) */}
+            {a2uiState && (
+              <div className="absolute bottom-10 right-10 animate-vertical-bounce transition-all hover:scale-105 active:scale-95 cursor-pointer z-50">
+                <div
+                  className="bg-blue-600 text-white px-6 py-4 rounded-full shadow-[0_10px_30px_rgba(30,64,175,0.4)] flex items-center gap-3 border-2 border-white"
+                  onClick={() => alert("Connecting you to a Mortgage Specialist...")}
+                >
+                  <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-lg">📞</div>
+                  <span className="font-black uppercase tracking-widest text-xs">Call an Expert</span>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-auto pt-10 pb-4 text-center">
+              <p className="text-[10px] font-bold text-slate-300 uppercase tracking-[0.3em]">Powered by Barclays A2UI \u2022 2026</p>
+            </div>
           </div>
         </div>
       </main>

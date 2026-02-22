@@ -204,6 +204,9 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                           }).addTo(map);
                           L.marker([${lat}, ${lng}]).addTo(map)
                             .bindPopup('${address.replace(/'/g, "\\'")}').openPopup();
+                          
+                          // Force a resize check after a small delay to ensure rendering matches container
+                          setTimeout(() => { map.invalidateSize(); }, 200);
                         } catch (e) {
                           console.error(e);
                           document.getElementById('map').innerHTML = '<div style="color: #ef4444; font-family: sans-serif; font-size: 11px;">Map Load Error</div>';
@@ -224,6 +227,66 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                             srcDoc={leafletHtml}
                             title="Property Map"
                         ></iframe>
+                    </div>
+                );
+            }
+            case 'Timeline': {
+                const steps = (component.data?.steps as string[]) || [];
+                const current = (component.data?.current as number) || 0;
+                return (
+                    <div key={id} className="w-full flex justify-between items-center mb-10 px-4 relative">
+                        <div className="absolute top-1/2 left-0 w-full h-0.5 bg-slate-100 -z-10 -translate-y-1/2"></div>
+                        {steps.map((step, i) => (
+                            <div key={i} className="flex flex-col items-center gap-2">
+                                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-black transition-all duration-500 shadow-sm ${i < current ? 'bg-green-500 text-white' :
+                                    i === current ? 'bg-blue-600 text-white ring-4 ring-blue-100 scale-110' :
+                                        'bg-white text-slate-300 border-2 border-slate-100'
+                                    }`}>
+                                    {i < current ? '✓' : i + 1}
+                                </div>
+                                <span className={`text-[10px] font-black uppercase tracking-tighter ${i === current ? 'text-blue-600' : 'text-slate-400'}`}>{step}</span>
+                            </div>
+                        ))}
+                    </div>
+                );
+            }
+            case 'DataCard': {
+                const items = (component.data?.items as { label: string, value: string, icon?: string }[]) || [];
+                return (
+                    <div key={id} className="grid grid-cols-2 gap-4 mb-6">
+                        {items.map((item, i) => (
+                            <div key={i} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-50 flex items-center gap-3 group hover:border-blue-100 transition-colors">
+                                <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-blue-600 group-hover:bg-blue-50 transition-colors">
+                                    {item.label.includes('Energy') ? '⚡' : item.label.includes('Tax') ? '🏛️' : '📋'}
+                                </div>
+                                <div>
+                                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{item.label}</p>
+                                    <p className="text-sm font-black text-blue-950">{item.value}</p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            }
+            case 'BenefitCard': {
+                return (
+                    <div key={id} className="w-full bg-gradient-to-br from-green-50 to-emerald-50 p-6 rounded-3xl border border-green-100 mb-6 flex items-center gap-5 animate-in slide-in-from-right-8 duration-1000">
+                        <div className="w-14 h-14 bg-green-500 rounded-2xl flex items-center justify-center text-2xl shadow-lg shadow-green-200/50">
+                            🌿
+                        </div>
+                        <div>
+                            <p className="text-[10px] font-black text-green-700 uppercase tracking-widest mb-1">{component.variant || 'Reward'}</p>
+                            <h4 className="text-lg font-black text-blue-950 leading-tight">{component.text}</h4>
+                            <p className="text-xs text-green-800/70 font-medium mt-1">{component.data?.detail as string}</p>
+                        </div>
+                    </div>
+                );
+            }
+            case 'ComparisonBadge': {
+                return (
+                    <div key={id} className="inline-flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100 mb-2">
+                        <span className="text-blue-600 text-xs">📈</span>
+                        <span className="text-[10px] font-bold text-blue-800 uppercase tracking-tight">{component.text}</span>
                     </div>
                 );
             }
