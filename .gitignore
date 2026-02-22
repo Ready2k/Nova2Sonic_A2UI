@@ -205,3 +205,30 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- Node / Client ---
+node_modules/
+client/node_modules/
+client/.next/
+client/out/
+client/build
+client/*.tsbuildinfo
+client/next-env.d.ts
+client/npm-debug.log*
+client/yarn-error.log*
+client/.env*
+
+# --- Python / Server ---
+server/.venv/
+server/venv/
+server/ENV/
+server/env/
+server/.pytest_cache/
+server/*.log
+server/*.pid
+
+# --- Root level ---
+.DS_Store
+.env
+.env.*
+!.env.example
