@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .models import WebSocketMessage, ActionPayload
 from .agent.graph import app_graph, AgentState
 from .nova_sonic import NovaSonicSession
+from .chat_endpoint import chat_ws_endpoint
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -362,3 +363,9 @@ async def websocket_endpoint(websocket: WebSocket):
             if sessions[session_id].get("sonic"):
                 asyncio.create_task(sessions[session_id]["sonic"].end_session())
             del sessions[session_id]
+
+
+# ─── Chat-only endpoint (no voice / Nova Sonic) ───────────────────────────────
+@app.websocket("/ws/chat")
+async def chat_websocket(websocket: WebSocket):
+    await chat_ws_endpoint(websocket)
