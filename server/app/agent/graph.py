@@ -133,13 +133,25 @@ def render_missing_inputs(state: AgentState):
     intent = state.get("intent", {})
     missing = []
     
-    if not intent.get("category"): missing.append("category")
+    category = intent.get("category")
+    
+    if not category: missing.append("category")
     elif intent.get("existingCustomer") is None: missing.append("whether you already bank with Barclays")
-    elif intent.get("propertySeen") is None: missing.append("if you have already found a property")
-    elif intent.get("propertySeen") and not intent.get("address"): missing.append("address")
-    elif not intent.get("propertyValue"): missing.append("property value")
-    elif not intent.get("loanBalance"): missing.append("loan balance")
-    elif not intent.get("fixYears"): missing.append("fixed term (years)")
+    
+    # Conditional logic: Remortgages don't need to 'find' a property
+    elif category == "Remortgage":
+        if not intent.get("address"): missing.append("address")
+        elif not intent.get("propertyValue"): missing.append("property value")
+        elif not intent.get("loanBalance"): missing.append("loan balance")
+        elif not intent.get("fixYears"): missing.append("fixed term (years)")
+    
+    # Purchase-style flows (FTB, Moving Home, BTL)
+    else:
+        if intent.get("propertySeen") is None: missing.append("if you have already found a property")
+        elif intent.get("propertySeen") and not intent.get("address"): missing.append("address")
+        elif not intent.get("propertyValue"): missing.append("property value")
+        elif not intent.get("loanBalance"): missing.append("loan balance")
+        elif not intent.get("fixYears"): missing.append("fixed term (years)")
 
     new_outbox = []
     new_messages = []
@@ -151,30 +163,43 @@ def render_missing_inputs(state: AgentState):
     
     if missing:
         logger.info(f"NODE: render_missing_inputs - missing={missing}, transcript='{state.get('transcript')}'")
-        if missing[0] == "category":
-            # Landing screen — if user typed something (like 'hi'), nudge them to pick
-            if state.get("transcript"):
-                msg = "Hello! Please select one of the mortgage categories below to get started."
-                new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-                new_messages.append({"role": "assistant", "text": msg})
+        
+        target_field = missing[0]
+        
+        # Intelligent generation via Nova 2 Lite
+        if os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_PROFILE"):
+            try:
+                from langchain_aws import ChatBedrockConverse
+                from langchain_core.messages import HumanMessage, SystemMessage
+                
+                model_id = os.getenv("AGENT_MODEL_ID", "amazon.nova-lite-v1:0")
+                llm = ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION", "us-east-1"))
+                
+                system_prompt = (
+                    "You are a helpful Barclays Mortgage Assistant. Your goal is to ask the user for a specific piece of information "
+                    "in a natural, conversational way. Be brief (1-2 sentences). "
+                    f"Current journey stage: {category}. "
+                )
+                
+                user_msg = f"Conversation history: {messages[-4:]}\n"
+                user_msg += f"The user just said: '{state.get('transcript')}'\n"
+                
+                if target_field == "category":
+                    user_msg += "Nudge the user to select one of the mortgage categories shown on screen."
+                else:
+                    user_msg += f"I need to find out: {target_field}. Ask the user for this information, acknowledging what they just said if appropriate."
+
+                response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
+                msg = response.content
+            except Exception as e:
+                logger.error(f"LLM generation error: {e}")
+                # Fallback to static if LLM fails
+                msg = f"Can you tell me your {target_field}?"
         else:
-            first_question_map = {
-                "whether you already bank with Barclays": "Do you already bank with Barclays?",
-                "if you have already found a property": "Have you already found a property?",
-                "address": "What is the address of the property?",
-                "property value": "What is the property value?",
-                "loan balance": "How much do you need to borrow?",
-                "fixed term (years)": "How many years do you want to fix — 2, 3, 5, or 10?",
-            }
-            q = first_question_map.get(missing[0], f"Can you tell me your {missing[0]}?")
-            
-            if just_selected:
-                msg = f"Great, I can help you with a {category} mortgage. {q}"
-            else:
-                msg = q
-            
-            new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-            new_messages.append({"role": "assistant", "text": msg})
+            msg = f"Can you tell me your {target_field}?"
+
+        new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+        new_messages.append({"role": "assistant", "text": msg})
         
     intent = state.get("intent", {})
     category = intent.get("category")
@@ -380,8 +405,35 @@ def render_products_a2ui(state: AgentState):
     
     new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
     
+    msg = ""
+    # Intelligent generation via Nova 2 Lite
+    if os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_PROFILE"):
+        try:
+            from langchain_aws import ChatBedrockConverse
+            from langchain_core.messages import HumanMessage, SystemMessage
+            
+            model_id = os.getenv("AGENT_MODEL_ID", "amazon.nova-lite-v1:0")
+            llm = ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION", "us-east-1"))
+            
+            system_prompt = (
+                "You are a helpful Barclays Mortgage Assistant. The user has provided all their details, "
+                "and you have found some mortgage products for them. Acknowledge their effort and "
+                "introduce the products shown on screen. Be brief (1-2 sentences)."
+            )
+            
+            user_msg = f"User Intent: {state.get('intent')}\n"
+            user_msg += f"Calculated LTV: {ltv}%\n"
+            user_msg += f"Number of products found: {len(products)}\n"
+            
+            response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
+            msg = response.content
+        except Exception as e:
+            logger.error(f"LLM product intro generation error: {e}")
+            msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."
+    else:
+        msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."
+
     if state.get("ui", {}).get("state") != "COMPARISON":
-        msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options."
         # Always nudge in text log if new products shown
         new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
         new_messages.append({"role": "assistant", "text": msg})
