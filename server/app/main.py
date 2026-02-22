@@ -271,30 +271,20 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not aws_access_key:
                         logger.warning("AWS Credentials not found. Nova Sonic will fail.")
                     
-                    # Build a tight system prompt from the LATEST state (not stale closure)
+                    # Nova Sonic is the transcription layer only.
+                    # The graph (via handle_finished -> process_outbox) delivers the next question as TTS.
+                    # Nova should give a minimal acknowledgment ONLY — one word, then stop.
                     current_intent = sessions[sid]["state"].get("intent", {})
                     category = current_intent.get("category", "a mortgage")
-                    missing_prompt_parts = []
-                    if current_intent.get("existingCustomer") is None:
-                        missing_prompt_parts.append("whether they already bank with Barclays (answer: yes or no)")
-                    elif current_intent.get("propertySeen") is None:
-                        missing_prompt_parts.append("whether they have found a property yet (answer: yes or no)")
-                    elif not current_intent.get("propertyValue"):
-                        missing_prompt_parts.append("the property value in pounds (e.g. 400000)")
-                    elif not current_intent.get("loanBalance"):
-                        missing_prompt_parts.append("the loan amount they need in pounds")
-                    elif not current_intent.get("fixYears"):
-                        missing_prompt_parts.append("how many years they want to fix: 2, 3, 5, or 10")
-                    
-                    next_question = missing_prompt_parts[0] if missing_prompt_parts else "confirm they are happy to proceed"
                     
                     sys_prompt = (
-                        f"You are a Barclays mortgage advisor. The customer is enquiring about: {category}. "
-                        "RULES (follow exactly): "
-                        "1. Respond with ONE sentence only. No lists, no explanations. "
-                        "2. Do not greet or introduce yourself. "
-                        f"3. Ask only for: {next_question}. "
-                        "4. After asking, stop and wait for the answer."
+                        f"You are a Barclays mortgage assistant processing a {category} enquiry. "
+                        "Your ONLY role is to transcribe what the user says. "
+                        "STRICT RULES: "
+                        "1. After the user speaks, say ONLY one of: 'Got it.' or 'Thanks.' — nothing else. "
+                        "2. Never ask questions. Never give advice. Never explain anything. "
+                        "3. Do not say hello. Do not introduce yourself. "
+                        "4. One word or two-word acknowledgment maximum, then stop completely."
                     )
                     await sonic.start_session(system_prompt=sys_prompt)
                     await sonic.start_audio_input()

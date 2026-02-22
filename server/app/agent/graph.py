@@ -32,12 +32,25 @@ class MortgageIntent(BaseModel):
     propertySeen: Optional[bool] = Field(description="Whether the user has already found a property they want to buy", default=None)
 
 def interpret_intent(state: AgentState):
-    transcript = state.get("transcript", "").lower()
+    transcript = state.get("transcript", "").strip()
     intent = state.get("intent", {}) or {}
     messages = state.get("messages", [])
     
     if not transcript:
         return {}
+
+    # Determine what question was last asked (so we can interpret short answers like "yes" correctly)
+    last_question_context = ""
+    if intent.get("existingCustomer") is None:
+        last_question_context = "The last question asked was: 'Do you already bank with Barclays?' — so 'yes'/'yes it is'/'yeah' means existingCustomer=true, 'no'/'nope' means existingCustomer=false."
+    elif intent.get("propertySeen") is None:
+        last_question_context = "The last question asked was: 'Have you found a property yet?' — so 'yes'/'yeah'/'found one' means propertySeen=true, 'no'/'not yet' means propertySeen=false."
+    elif not intent.get("propertyValue"):
+        last_question_context = "The last question asked was about property value. Extract the number from the answer."
+    elif not intent.get("loanBalance"):
+        last_question_context = "The last question asked was about loan amount. Extract the number from the answer."
+    elif not intent.get("fixYears"):
+        last_question_context = "The last question asked was about fixed term years (2, 3, 5, or 10). Extract the number."
 
     if os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_PROFILE"):
         try:
@@ -52,24 +65,20 @@ def interpret_intent(state: AgentState):
             structured_llm = llm.with_structured_output(MortgageIntent)
             
             lc_messages = []
-            for msg in messages:
+            for msg in messages[:-2]:  # exclude last 2 which are already in the prompt  
                 if msg.get("role") == "user":
-                    if "image" in msg:
-                        lc_messages.append(HumanMessage(content=[
-                            {"type": "text", "text": msg.get("text", "")},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{msg['image']}"}}
-                        ]))
-                    else:
-                        lc_messages.append(HumanMessage(content=msg.get("text", "")))
+                    lc_messages.append(HumanMessage(content=msg.get("text", "")))
                         
             current_prompt = (
-                "Extract mortgage details from the following user transcript. \n"
-                "STRICT RULES:\n"
-                "1. Only set existingCustomer if the user definitively confirms they bank with Barclays.\n"
-                "2. Only set propertySeen if the user definitively says they have found a property.\n"
-                "3. If the user just says 'Hi' or generic greetings, do NOT extract values for these fields; leave them as null.\n"
-                "4. Do NOT assume or guess based on conversational flow.\n\n"
-                f"Current Intent: {intent}\nTranscript: {transcript}"
+                f"Extract mortgage details from the user's latest response.\n"
+                f"Context: {last_question_context}\n"
+                f"Current known intent: {intent}\n"
+                f"User just said: '{transcript}'\n\n"
+                "Rules:\n"
+                "- Interpret short answers (yes/no/yeah/nope) using the context above.\n"
+                "- For money amounts, extract the number (e.g. '400k' = 400000, '400 thousand' = 400000).\n"
+                "- Do NOT change fields that already have values unless the user explicitly corrects them.\n"
+                "- If the user is just being conversational ('okay', 'go for it'), do NOT change any fields.\n"
             )
             lc_messages.append(HumanMessage(content=current_prompt))
             
@@ -88,13 +97,19 @@ def interpret_intent(state: AgentState):
             traceback.print_exc()
             print(f"Fallback to mock parsing due to Bedrock error: {e}")
 
+    # Keyword fallback (no AWS)
     new_intent = dict(intent)
-    if "yes" in transcript and ("bank" in transcript or "account" in transcript):
-        new_intent["existingCustomer"] = True
-    if "no" in transcript and ("bank" in transcript or "account" in transcript):
-        new_intent["existingCustomer"] = False
-    if ("found" in transcript or "seen" in transcript) and "property" in transcript:
-        new_intent["propertySeen"] = True
+    t = transcript.lower()
+    if intent.get("existingCustomer") is None:
+        if any(w in t for w in ["yes", "yeah", "yep", "do", "i am", "i do", "it is"]):
+            new_intent["existingCustomer"] = True
+        elif any(w in t for w in ["no", "nope", "don't", "dont", "not"]):
+            new_intent["existingCustomer"] = False
+    elif intent.get("propertySeen") is None:
+        if any(w in t for w in ["yes", "yeah", "found", "seen", "have"]):
+            new_intent["propertySeen"] = True
+        elif any(w in t for w in ["no", "nope", "not yet", "haven't"]):
+            new_intent["propertySeen"] = False
 
     return {
         "intent": new_intent,
