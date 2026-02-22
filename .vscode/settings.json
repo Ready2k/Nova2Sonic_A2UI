@@ -8,6 +8,15 @@
         "/^bash manage\\.sh stop && sleep 2 && bash manage\\.sh start && sleep 4 && bash manage\\.sh status$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^bash manage\\.sh restart && sleep 4 && bash manage\\.sh status$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "npm --prefix server": true,
+        "/^bash manage\\.sh restart && sleep 3 && tail -60 logs/server\\.log && echo '--- client log ---' && tail -60 logs/client\\.log$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

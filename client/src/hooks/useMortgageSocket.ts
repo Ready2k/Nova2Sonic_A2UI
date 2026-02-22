@@ -130,7 +130,8 @@ class AudioStreamer {
 export function useMortgageSocket(url: string) {
     const [socket, setSocket] = useState<WebSocket | null>(null);
     const [connected, setConnected] = useState(false);
-    const [shouldConnect, setShouldConnect] = useState(true);
+    // Do not auto-connect on mount; require user to call `connect()` manually
+    const [shouldConnect, setShouldConnect] = useState(false);
     const [messages, setMessages] = useState<{ role: 'user' | 'assistant', text: string, image?: string }[]>([]);
     const [voicePlaying, setVoicePlaying] = useState(false);
     const [a2uiState, setA2uiState] = useState<A2UIPayload | null>(null);
