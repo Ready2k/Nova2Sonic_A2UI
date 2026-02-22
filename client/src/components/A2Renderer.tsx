@@ -171,12 +171,68 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         {component.text}
                     </button>
                 );
+            case 'Map': {
+                const mapData = (component.data || {}) as { lat?: number; lng?: number; address?: string };
+                const lat = mapData.lat || 51.5074;
+                const lng = mapData.lng || -0.1278;
+                const address = mapData.address || '';
+
+                const leafletHtml = `
+                <html>
+                  <head>
+                    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+                    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                    <style>
+                      html, body { height: 100%; margin: 0; padding: 0; }
+                      #map { height: 100%; width: 100%; }
+                    </style>
+                  </head>
+                  <body>
+                    <div id="map" style="height: 100%; width: 100%; background: #f8fafc; display: flex; align-items: center; justify-content: center;">
+                        <div style="color: #94a3b8; font-family: sans-serif; font-size: 12px;">Loading Map...</div>
+                    </div>
+                    <script>
+                      window.onload = function() {
+                        try {
+                          if (typeof L === 'undefined') {
+                            document.getElementById('map').innerHTML = '<div style="color: #ef4444; font-family: sans-serif; font-size: 11px;">Map Library Failed to Load</div>';
+                            return;
+                          }
+                          const map = L.map('map', { zoomControl: false }).setView([${lat}, ${lng}], 15);
+                          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                            attribution: '&copy; OpenStreetMap'
+                          }).addTo(map);
+                          L.marker([${lat}, ${lng}]).addTo(map)
+                            .bindPopup('${address.replace(/'/g, "\\'")}').openPopup();
+                        } catch (e) {
+                          console.error(e);
+                          document.getElementById('map').innerHTML = '<div style="color: #ef4444; font-family: sans-serif; font-size: 11px;">Map Load Error</div>';
+                        }
+                      };
+                    </script>
+                  </body>
+                </html>
+                `;
+
+                return (
+                    <div key={id} className="w-full h-72 rounded-3xl overflow-hidden shadow-xl border-4 border-white mb-6 animate-in zoom-in-95 duration-700">
+                        <iframe
+                            width="100%"
+                            height="100%"
+                            frameBorder="0"
+                            style={{ border: 0 }}
+                            srcDoc={leafletHtml}
+                            title="Property Map"
+                        ></iframe>
+                    </div>
+                );
+            }
             case 'Image':
                 return (
                     <div key={id} className="flex justify-center p-4">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                            src={component.data?.url}
+                            src={(component.data?.url as string) || undefined}
                             alt={component.text}
                             className="max-w-[120px] h-auto object-contain animate-in zoom-in-50 duration-500"
                         />

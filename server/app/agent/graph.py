@@ -5,6 +5,7 @@ import operator
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
 from .tools import calculate_ltv, fetch_mortgage_products, recalculate_monthly_payment
+from geopy.geocoders import Nominatim
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class MortgageIntent(BaseModel):
     termYears: Optional[int] = Field(description="The overall mortgage repayment term in years, default is 25", default=25)
     existingCustomer: Optional[bool] = Field(description="Whether the user already banks with Barclays", default=None)
     propertySeen: Optional[bool] = Field(description="Whether the user has already found a property they want to buy", default=None)
+    address: Optional[str] = Field(description="The address of the property", default=None)
+    lat: Optional[float] = Field(description="Latitude of the property", default=None)
+    lng: Optional[float] = Field(description="Longitude of the property", default=None)
 
 def interpret_intent(state: AgentState):
     transcript = state.get("transcript", "").strip()
@@ -132,6 +136,7 @@ def render_missing_inputs(state: AgentState):
     if not intent.get("category"): missing.append("category")
     elif intent.get("existingCustomer") is None: missing.append("whether you already bank with Barclays")
     elif intent.get("propertySeen") is None: missing.append("if you have already found a property")
+    elif intent.get("propertySeen") and not intent.get("address"): missing.append("address")
     elif not intent.get("propertyValue"): missing.append("property value")
     elif not intent.get("loanBalance"): missing.append("loan balance")
     elif not intent.get("fixYears"): missing.append("fixed term (years)")
@@ -156,6 +161,7 @@ def render_missing_inputs(state: AgentState):
             first_question_map = {
                 "whether you already bank with Barclays": "Do you already bank with Barclays?",
                 "if you have already found a property": "Have you already found a property?",
+                "address": "What is the address of the property?",
                 "property value": "What is the property value?",
                 "loan balance": "How much do you need to borrow?",
                 "fixed term (years)": "How many years do you want to fix — 2, 3, 5, or 10?",
@@ -210,10 +216,12 @@ def render_missing_inputs(state: AgentState):
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
     fy = intent.get("fixYears")
+    addr = intent.get("address")
     
     pv_text = f"£{pv:,}" if pv else "Pending..."
     lb_text = f"£{lb:,}" if lb else "Pending..."
     fy_text = f"{fy} Years" if fy else "Pending..."
+    addr_text = addr if addr else "N/A"
 
     # Determine which field the agent is currently asking about (first missing one)
     next_missing = missing[0] if missing else None
@@ -221,6 +229,7 @@ def render_missing_inputs(state: AgentState):
     pv_focus = next_missing in ("property value",)
     lb_focus = next_missing in ("loan balance",)
     fy_focus = next_missing in ("fixed term (years)",)
+    addr_focus = next_missing in ("address",)
     
     # Existing-customer / propertySeen are asked verbally only, no dedicated field row
     # But we can show all three rows always, highlighting the relevant one.
@@ -229,8 +238,12 @@ def render_missing_inputs(state: AgentState):
     components = [
         {"id": "root", "component": "Column", "children": ["header", "details_col"]},
         {"id": "header", "component": "Text", "text": f"Let\u2019s build your quote {category_label}", "variant": "h2"},
-        {"id": "details_col", "component": "Column", "children": ["row_pv", "row_lb", "row_fy"]},
+        {"id": "details_col", "component": "Column", "children": ["row_addr", "row_pv", "row_lb", "row_fy"]},
         
+        {"id": "row_addr", "component": "Row", "children": ["lbl_addr", "val_addr"]},
+        {"id": "lbl_addr", "component": "Text", "text": "Property Address:", "variant": "h3", "focus": addr_focus},
+        {"id": "val_addr", "component": "Text", "text": addr_text, "variant": "body", "focus": addr_focus},
+
         {"id": "row_pv", "component": "Row", "children": ["lbl_pv", "val_pv"]},
         {"id": "lbl_pv", "component": "Text", "text": "Property Value:", "variant": "h3", "focus": pv_focus},
         {"id": "val_pv", "component": "Text", "text": pv_text, "variant": "body", "focus": pv_focus},
@@ -243,6 +256,32 @@ def render_missing_inputs(state: AgentState):
         {"id": "lbl_fy", "component": "Text", "text": "Fixed Term:", "variant": "h3", "focus": fy_focus},
         {"id": "val_fy", "component": "Text", "text": fy_text, "variant": "body", "focus": fy_focus},
     ]
+
+    lat = intent.get("lat")
+    lng = intent.get("lng")
+
+    if addr and (lat is None or lng is None):
+        try:
+            geolocator = Nominatim(user_agent="barclays_mortgage_demo")
+            location = geolocator.geocode(addr)
+            if location:
+                lat = location.latitude
+                lng = location.longitude
+                intent["lat"] = lat
+                intent["lng"] = lng
+                logger.info(f"Geocoding success: {addr} -> ({lat}, {lng})")
+            else:
+                logger.warning(f"Geocoding failed (no result): {addr}")
+        except Exception as e:
+            logger.error(f"Geocoding error: {e}")
+
+    if addr:
+        map_data = {"address": addr}
+        if lat and lng:
+            map_data.update({"lat": lat, "lng": lng})
+        
+        components.insert(1, {"id": "map_view", "component": "Map", "text": addr, "data": map_data})
+        components[0]["children"].insert(1, "map_view")
     
     payload = {
         "version": "v0.9",
