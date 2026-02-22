@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import Image from 'next/image';
 import { useMortgageSocket } from '../hooks/useMortgageSocket';
 import A2Renderer from '../components/A2Renderer';
 import LatencyHud from '../components/LatencyHud';
@@ -27,35 +28,22 @@ export default function Home() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [userMessages, setUserMessages] = useState<{ role: 'user' | 'assistant', text: string, image?: string }[]>([]);
   const [isRecording, setIsRecording] = useState(false);
-  const [mounted, setMounted] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     // Scroll to bottom of message log when new message is added
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [userMessages]);
 
-  useEffect(() => {
-    if (transcript && transcript.text) {
-      setUserMessages(prev => {
-        // If the newest transcript is exactly identical to the last one (e.g. socket re-fire), skip.
-        // Otherwise, always append it to the chat log.
-        const lastMsg = prev[prev.length - 1];
-        if (lastMsg && lastMsg.text === transcript.text && lastMsg.role === transcript.role) {
-          return prev;
-        }
-
-        // If it's a new message, just add it. Bedrock doesn't stream words sequentially replacing the last message;
-        // it triggers `server.transcript.final` with fresh sentences.
-        return [...prev, { role: transcript.role as 'user' | 'assistant', text: transcript.text }];
-      });
+  const displayedMessages = useMemo(() => {
+    if (!transcript?.text) return userMessages;
+    const lastMsg = userMessages[userMessages.length - 1];
+    if (lastMsg && lastMsg.text === transcript.text && lastMsg.role === transcript.role) {
+      return userMessages;
     }
-  }, [transcript]);
+    return [...userMessages, { role: transcript.role as 'user' | 'assistant', text: transcript.text }];
+  }, [userMessages, transcript]);
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -94,7 +82,6 @@ export default function Home() {
     }
   };
 
-  if (!mounted) return null;
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
@@ -152,17 +139,17 @@ export default function Home() {
 
               {/* Chat Message Log */}
               <div className="flex-1 overflow-y-auto w-full pr-2 space-y-4 mb-4 mt-2 no-scrollbar">
-                {userMessages.length === 0 && !transcript && !thinkingState && !voicePlaying && (
+                {displayedMessages.length === 0 && !transcript && !thinkingState && !voicePlaying && (
                   <div className="h-full flex items-center justify-center text-center">
                     <div className="text-gray-400 text-sm font-semibold tracking-wide">
                       {mode === 'voice' ? 'Ready for your voice command...' : 'Attach a photo or type a message below...'}
                     </div>
                   </div>
                 )}
-                {userMessages.map((msg, i) => (
+                {displayedMessages.map((msg, i) => (
                   <div key={i} className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                     {msg.image && (
-                      <img src={msg.image} alt="User Upload" className="w-32 h-32 object-cover rounded-xl shadow-sm border border-gray-200" />
+                      <Image src={msg.image} alt="User Upload" width={128} height={128} className="w-32 h-32 object-cover rounded-xl shadow-sm border border-gray-200" unoptimized />
                     )}
                     {msg.text && (
                       <div className={`rounded-2xl px-4 py-2 shadow-sm max-w-[85%] text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-white border border-gray-200 text-gray-800 rounded-tl-sm leading-relaxed'}`}>
@@ -212,7 +199,7 @@ export default function Home() {
                   <div className="w-full flex flex-col gap-2">
                     {selectedImage && (
                       <div className="relative inline-block w-16 h-16 ml-3">
-                        <img src={selectedImage} alt="Preview" className="w-16 h-16 object-cover rounded-lg border-2 border-blue-500 shadow-sm" />
+                        <Image src={selectedImage} alt="Preview" width={64} height={64} className="w-16 h-16 object-cover rounded-lg border-2 border-blue-500 shadow-sm" unoptimized />
                         <button
                           onClick={() => setSelectedImage(null)}
                           className="absolute -top-2 -right-2 bg-gray-800 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs hover:bg-red-500"

@@ -8,7 +8,7 @@ export interface A2UIComponent {
     variant?: string;
     value?: number;
     max?: number;
-    data?: any;
+    data?: Record<string, unknown>;
 }
 
 export interface A2UIUpdateComponents {
@@ -23,7 +23,7 @@ export interface A2UIPayload {
 
 interface A2UIRendererProps {
     payload: A2UIPayload | null;
-    onAction: (id: string, data?: any) => void;
+    onAction: (id: string, data?: Record<string, unknown>) => void;
 }
 
 const A2UIRenderer: React.FC<A2UIRendererProps> = ({ payload, onAction }) => {
@@ -90,7 +90,7 @@ const A2UIRenderer: React.FC<A2UIRendererProps> = ({ payload, onAction }) => {
                     </div>
                 );
             case 'ProductCard':
-                const p = component.data;
+                const p = (component.data ?? {}) as { id?: string; name?: string; rate?: number; fee?: number; monthlyPayment?: number; totalInterest?: number };
                 return (
                     <div
                         key={id}

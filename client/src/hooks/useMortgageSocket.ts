@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useId } from 'react';
 
 export interface ActionPayload {
     actionId: string;
-    data?: any;
+    data?: Record<string, unknown>;
 }
 
 class AudioStreamer {
@@ -10,7 +10,7 @@ class AudioStreamer {
     private nextStartTime: number = 0;
 
     constructor() {
-        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        this.audioContext = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)({ sampleRate: 24000 });
     }
 
     public playChunk(base64: string) {
@@ -60,18 +60,31 @@ export function useMortgageSocket(url: string) {
     const [shouldConnect, setShouldConnect] = useState(true);
     const [transcript, setTranscript] = useState<{ text: string, role: string } | null>(null);
     const [voicePlaying, setVoicePlaying] = useState(false);
-    const [a2uiState, setA2uiState] = useState<any>(null);
+    const [a2uiState, setA2uiState] = useState<Record<string, unknown> | null>(null);
     const [thinkingState, setThinkingState] = useState<string | null>(null);
 
     const [ttfb, setTtfb] = useState<number | null>(null);
     const [uiPatchLatency, setUiPatchLatency] = useState<number | null>(null);
     const [voiceLatency, setVoiceLatency] = useState<number | null>(null);
 
+    const hookId = useId();
+
     const requestStartRef = useRef<number>(0);
+    const ttfbRef = useRef<number | null>(null);
+    const uiPatchLatencyRef = useRef<number | null>(null);
+    const clientSessionIdRef = useRef<string>('');
     const streamerRef = useRef<AudioStreamer | null>(null);
     const recordingContextRef = useRef<AudioContext | null>(null);
     const recordingStreamRef = useRef<MediaStream | null>(null);
     const recordingProcessorRef = useRef<ScriptProcessorNode | null>(null);
+
+    useEffect(() => { ttfbRef.current = ttfb; }, [ttfb]);
+    useEffect(() => { uiPatchLatencyRef.current = uiPatchLatency; }, [uiPatchLatency]);
+    useEffect(() => {
+        if (!clientSessionIdRef.current) {
+            clientSessionIdRef.current = `client-${hookId}`;
+        }
+    }, [hookId]);
 
     const stopAudioBuffer = useCallback(() => {
         if (streamerRef.current) {
@@ -103,7 +116,7 @@ export function useMortgageSocket(url: string) {
 
         ws.onopen = () => {
             setConnected(true);
-            ws.send(JSON.stringify({ type: 'client.hello', sessionId: 'init-123' }));
+            ws.send(JSON.stringify({ type: 'client.hello', sessionId: clientSessionIdRef.current }));
             setSocket(ws);
         };
 
@@ -111,7 +124,7 @@ export function useMortgageSocket(url: string) {
             const data = JSON.parse(event.data);
             const { type, payload } = data;
 
-            if (!ttfb && requestStartRef.current) {
+            if (!ttfbRef.current && requestStartRef.current) {
                 setTtfb(Date.now() - requestStartRef.current);
             }
 
@@ -135,7 +148,7 @@ export function useMortgageSocket(url: string) {
             } else if (type === 'server.voice.stop') {
                 setTimeout(() => setVoicePlaying(false), 2000);
             } else if (type === 'server.a2ui.patch') {
-                if (!uiPatchLatency && requestStartRef.current) {
+                if (!uiPatchLatencyRef.current && requestStartRef.current) {
                     setUiPatchLatency(Date.now() - requestStartRef.current);
                 }
                 setA2uiState(payload);
@@ -161,14 +174,14 @@ export function useMortgageSocket(url: string) {
     const connect = useCallback(() => setShouldConnect(true), []);
     const disconnect = useCallback(() => setShouldConnect(false), []);
 
-    const sendAction = (actionId: string, data?: any) => {
+    const sendAction = (actionId: string, data?: Record<string, unknown>) => {
         if (!socket) return;
         requestStartRef.current = Date.now();
         setTtfb(null);
         setUiPatchLatency(null);
         socket.send(JSON.stringify({
             type: 'client.ui.action',
-            sessionId: 'init-123',
+            sessionId: clientSessionIdRef.current,
             payload: { id: actionId, data }
         }));
     };
@@ -183,7 +196,7 @@ export function useMortgageSocket(url: string) {
         if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({
                 type: 'client.text',
-                sessionId: 'init-123',
+                sessionId: clientSessionIdRef.current,
                 payload: { text, image }
             }));
         }
@@ -203,18 +216,18 @@ export function useMortgageSocket(url: string) {
             stopAudioBuffer();
             socket.send(JSON.stringify({
                 type: 'client.audio.interrupt',
-                sessionId: 'init-123'
+                sessionId: clientSessionIdRef.current
             }));
         }
 
         socket.send(JSON.stringify({
             type: 'client.audio.start',
-            sessionId: 'init-123'
+            sessionId: clientSessionIdRef.current
         }));
 
         try {
             // Create AudioContext BEFORE getUserMedia to avoid suspension rules on some browsers
-            const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+            const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
             const audioCtx = new AudioContextClass({ sampleRate: 16000 });
             recordingContextRef.current = audioCtx;
 
@@ -259,7 +272,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
             await audioCtx.audioWorklet.addModule(workletUrl);
 
             const workletNode = new AudioWorkletNode(audioCtx, 'pcm16-processor');
-            (recordingProcessorRef as any).current = workletNode;
+            recordingProcessorRef.current = workletNode as unknown as ScriptProcessorNode;
 
             workletNode.port.onmessage = (e) => {
                 const buffer = e.data;
@@ -275,7 +288,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
                     console.log("[Audio] Sending chunk of size", base64.length);
                     socket.send(JSON.stringify({
                         type: 'client.audio.chunk',
-                        sessionId: 'init-123',
+                        sessionId: clientSessionIdRef.current,
                         payload: { data: base64 }
                     }));
                 }
@@ -299,7 +312,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
         if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({
                 type: 'client.audio.stop',
-                sessionId: 'init-123'
+                sessionId: clientSessionIdRef.current
             }));
         }
     };

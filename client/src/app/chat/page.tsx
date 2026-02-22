@@ -10,14 +10,6 @@ interface ChatMessage {
     ts: number;
 }
 
-interface A2UIState {
-    version: string;
-    updateComponents: {
-        surfaceId: string;
-        components: Record<string, unknown>[];
-    };
-}
-
 // ─── WebSocket hook (chat-only, no voice/Nova Sonic) ─────────────────────────
 function useChatSocket(url: string) {
     const [connected, setConnected] = useState(false);
@@ -35,7 +27,7 @@ function useChatSocket(url: string) {
         });
     }, []);
 
-    const connect = useCallback(() => {
+    const connect = useCallback(function connectSocket() {
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
         const ws = new WebSocket(url);
@@ -49,7 +41,7 @@ function useChatSocket(url: string) {
         ws.onclose = () => {
             setConnected(false);
             // Reconnect after 2 s
-            reconnectRef.current = setTimeout(connect, 2000);
+            reconnectRef.current = setTimeout(connectSocket, 2000);
         };
 
         ws.onerror = () => ws.close();
@@ -126,10 +118,8 @@ export default function ChatPage() {
         useChatSocket(wsUrl);
 
     const [input, setInput] = useState("");
-    const [mounted, setMounted] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
 
-    useEffect(() => { setMounted(true); }, []);
     useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
     const handleSend = () => {
@@ -143,7 +133,6 @@ export default function ChatPage() {
         if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
     };
 
-    if (!mounted) return null;
 
     return (
         <div className="chat-root">
