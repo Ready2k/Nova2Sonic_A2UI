@@ -39,9 +39,6 @@ async function main() {
                                 maxTokens: 2048,
                                 topP: 0.9,
                                 temperature: 0.7
-                            },
-                            turnDetectionConfiguration: {
-                                endpointingSensitivity: "HIGH"
                             }
                         }
                     }
@@ -254,6 +251,8 @@ async function main() {
         const response = await client.send(command);
         let firstAudioContentBlock = true;
         let seenAudioOutput = false;
+        let audioChunkCount = 0;
+        let hasSeenPromptEnd = false;
 
         for await (const event of response.body) {
             if (event.chunk && event.chunk.bytes) {
@@ -262,12 +261,17 @@ async function main() {
 
                 if (eventData.audioOutput) {
                     seenAudioOutput = true;
+                    audioChunkCount++;
                     // Print prefix so Python subprocess reader can distinguish audio chunks from stdout noise
                     const audioData = eventData.audioOutput.content || eventData.audioOutput;
                     console.log(`AUDIO_CHUNK:${audioData}`);
+                    console.error(`[TTS DEBUG] Audio chunk ${audioChunkCount}, size: ${audioData.length || 'unknown'}`);
                 }
 
-                if (eventData.completionEnd || (eventData.contentEnd && seenAudioOutput)) {
+                // Only finish when we see promptEnd - this signals the entire response is complete
+                if (eventData.promptEnd) {
+                    console.error(`[TTS DEBUG] Prompt ended, total audio chunks received: ${audioChunkCount}`);
+                    hasSeenPromptEnd = true;
                     finishSignal();
                 }
 
@@ -276,6 +280,10 @@ async function main() {
                     process.exit(1);
                 }
             }
+        }
+        if (!hasSeenPromptEnd) {
+            console.error(`[TTS DEBUG] Stream ended without promptEnd, received ${audioChunkCount} audio chunks`);
+            finishSignal();
         }
     } catch (e) {
         console.error("Error from Bedrock:", e);

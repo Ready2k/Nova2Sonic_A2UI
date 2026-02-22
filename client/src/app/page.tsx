@@ -18,6 +18,7 @@ export default function Home() {
     sendText,
     sendAudioStart,
     sendAudioStop,
+    sendModeUpdate,
     connect,
     disconnect,
     latency
@@ -34,6 +35,13 @@ export default function Home() {
     // Scroll to bottom of message log when new message is added
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    // Notify server when client mode changes
+    if (connected) {
+      sendModeUpdate(mode);
+    }
+  }, [mode, connected, sendModeUpdate]);
 
   const toggleRecording = async () => {
     if (isRecording) {

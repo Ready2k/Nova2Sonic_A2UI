@@ -57,29 +57,41 @@ async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload
 async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: str):
     """Run Node TTS synchronously (awaited) so the WS stays open for the full audio stream."""
     try:
+        logger.info(f"[TTS] Starting for text: {text_to_speak[:60]}")
         proc = await asyncio.create_subprocess_exec(
             "node", "nova_sonic_tts.mjs", text_to_speak,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=os.path.dirname(os.path.dirname(__file__))
         )
+        chunk_count = 0
         while True:
             line = await proc.stdout.readline()
-            if not line: break
+            if not line: 
+                logger.info(f"[TTS] No more output, received {chunk_count} audio chunks")
+                break
             decoded = line.decode().strip()
             if decoded.startswith("AUDIO_CHUNK:"):
-                await send_msg(websocket, session_id, "server.voice.audio", {"data": decoded.split("AUDIO_CHUNK:")[1]})
+                chunk_count += 1
+                chunk_data = decoded.split("AUDIO_CHUNK:")[1]
+                logger.info(f"[TTS] Sending audio chunk {chunk_count}, size: {len(chunk_data)}")
+                await send_msg(websocket, session_id, "server.voice.audio", {"data": chunk_data})
         await proc.wait()
+        logger.info(f"[TTS] Process completed, sent {chunk_count} total chunks")
     except Exception as e:
         logger.error(f"TTS fallback failed: {e}")
     finally:
         if session_id in sessions:
+            logger.info(f"[TTS] Setting voice_playing to False")
             sessions[session_id]["voice_playing"] = False
+        logger.info(f"[TTS] Sending voice.stop for {session_id}")
         await send_msg(websocket, session_id, "server.voice.stop", {})
 
 
 async def process_outbox(websocket: WebSocket, sid: str):
     state = sessions[sid]["state"]
     outbox = state.get("outbox", [])
+    voice_say_count = len([e for e in outbox if e["type"] == "server.voice.say"])
+    logger.info(f"[process_outbox] Processing {len(outbox)} events, {voice_say_count} voice.say events")
     sonic_active = sessions[sid].get("sonic") is not None
     
     # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
@@ -96,16 +108,19 @@ async def process_outbox(websocket: WebSocket, sid: str):
             # Echo to chat transcript immediately
             await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
             
-            # Skip talking if in text mode
+            # Skip TTS if client is in Text Only mode
             if state.get("mode") == "text":
-                logger.info("Skipping TTS (Text Only mode)")
+                logger.info("Skipping TTS (client in Text Only mode)")
                 continue
 
-            # Always speak if not already playing voice from another source
+            # Send TTS if not already playing voice from another source
             if not sessions[sid].get("voice_playing"):
+                logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
                 # No active voice session — fire TTS as background task (non-blocking)
                 sessions[sid]["voice_playing"] = True
                 asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
+            else:
+                logger.warning(f"[TTS] Skipping TTS - voice already playing")
     
     # Clear outbox and thinking state
     state["outbox"] = []
@@ -116,6 +131,7 @@ async def process_outbox(websocket: WebSocket, sid: str):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = f"sess_{id(websocket)}"
+    logger.info(f"[WebSocket] New connection: {session_id}")
     
     sessions[session_id] = {
         "state": create_initial_state(),
@@ -203,17 +219,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     traceback.print_exc()
                 
             if msg_type == "client.audio.start":
-                if state.get("mode") == "text":
-                    logger.warning(f"Rejecting audio start for {sid} - in Text Only mode")
-                    continue
-
+                # Allow audio input regardless of current mode - mode will be set to "voice" when transcript is ready
                 if session_data["sonic"]:
                     try:
                         await session_data["sonic"].end_session()
                     except: pass
                 
+                # Note: Don't forward Nova Sonic's audio chunks to client - Nova Sonic is used for transcription only
+                # Its audio (acknowledgments like "Got it") should not be played back. Only capture the transcription.
                 sonic = NovaSonicSession(
-                    on_audio_chunk=handle_audio_chunk, 
+                    on_audio_chunk=lambda x: None,  # Suppress Nova Sonic's own audio output
                     on_text_chunk=lambda t: handle_text_chunk(t, False),
                     on_finished=handle_finished
                 )
@@ -250,15 +265,16 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     sonic.display_assistant_text = False
                                         elif 'textOutput' in event:
                                             text = event['textOutput']['content']    
-                                            if sonic.role == "ASSISTANT" and sonic.display_assistant_text:
-                                                if sonic.on_text_chunk:
-                                                    await sonic.on_text_chunk(text)
-                                            elif sonic.role == "USER":
+                                            # Only capture user's speech transcription from Nova Sonic, not its acknowledgments
+                                            if sonic.role == "USER":
                                                 await handle_text_chunk(text, True)
+                                            elif sonic.role == "ASSISTANT":
+                                                # Suppress Nova Sonic's assistant text responses (like "Got it") - we only want transcription
+                                                logger.debug(f"Suppressing Nova Sonic assistant response: {text[:30]}")
                                         elif 'audioOutput' in event:
-                                            audio_content = event['audioOutput']['content']
-                                            if sonic.on_audio_chunk:
-                                                await sonic.on_audio_chunk(audio_content)
+                                            # Skip Nova Sonic's audio output - we only want transcription
+                                            # The agent will handle creating TTS audio for responses
+                                            pass
                                         elif 'contentEnd' in event:
                                             if sonic.role == "USER":
                                                 await handle_finished()
@@ -384,6 +400,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     import traceback
                     logger.error(f"Error handling UI action '{action_id}': {e}")
                     traceback.print_exc()
+                    
+            elif msg_type == "client.mode.update":
+                new_mode = payload.get("mode", "text")
+                logger.info(f"Mode update from client: {new_mode}")
+                state["mode"] = new_mode
                 
     except WebSocketDisconnect:
         if session_id in sessions:

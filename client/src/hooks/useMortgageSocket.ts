@@ -8,57 +8,129 @@ export interface ActionPayload {
 
 class AudioStreamer {
     private audioContext: AudioContext;
-    private nextStartTime: number = 0;
+    private nextStartTime: number | null = null;
+    private isInitialized: boolean = false;
+    private chunkQueue: string[] = [];
+    private isProcessing: boolean = false;
+    private isAcceptingChunks: boolean = true;
 
     constructor() {
         this.audioContext = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)({ sampleRate: 24000 });
+        console.log('[AudioStreamer] Created with state:', this.audioContext.state);
     }
 
-    public playChunk(base64: string) {
+    private async ensureResumed() {
         if (this.audioContext.state === 'suspended') {
-            this.audioContext.resume();
+            try {
+                await this.audioContext.resume();
+                console.log('[AudioStreamer] Resumed audio context');
+            } catch (err) {
+                console.error('[AudioStreamer] Failed to resume:', err);
+                throw err;
+            }
         }
+    }
 
-        const binaryString = window.atob(base64);
-        const len = binaryString.length;
-        const bytes = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
+    private async processQueue() {
+        if (this.isProcessing) return;
+        this.isProcessing = true;
+
+        try {
+            while (this.chunkQueue.length > 0 && this.isAcceptingChunks) {
+                const chunk = this.chunkQueue.shift();
+                if (chunk) {
+                    await this._playChunk(chunk);
+                }
+            }
+        } finally {
+            this.isProcessing = false;
         }
+    }
 
-        const int16Data = new Int16Array(bytes.buffer);
-        const float32Data = new Float32Array(int16Data.length);
-        for (let i = 0; i < int16Data.length; i++) {
-            float32Data[i] = int16Data[i] / 32768.0;
+    private async _playChunk(base64: string) {
+        try {
+            // Ensure audio context is running
+            await this.ensureResumed();
+
+            const binaryString = window.atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            const int16Data = new Int16Array(bytes.buffer);
+            const float32Data = new Float32Array(int16Data.length);
+            for (let i = 0; i < int16Data.length; i++) {
+                float32Data[i] = int16Data[i] / 32768.0;
+            }
+
+            const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, 24000);
+            audioBuffer.getChannelData(0).set(float32Data);
+
+            const source = this.audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(this.audioContext.destination);
+
+            // Initialize nextStartTime on first chunk
+            if (this.nextStartTime === null) {
+                this.nextStartTime = this.audioContext.currentTime;
+                this.isInitialized = true;
+                console.log('[AudioStreamer] First chunk - scheduling from', this.nextStartTime);
+            }
+
+            const currentTime = this.audioContext.currentTime;
+            // Ensure we don't schedule in the past (with small buffer)
+            if (this.nextStartTime < currentTime) {
+                console.warn('[AudioStreamer] Scheduling time is in past, resetting. current:', currentTime, 'next:', this.nextStartTime);
+                this.nextStartTime = currentTime + 0.01; // Small buffer
+            }
+
+            console.log('[AudioStreamer] Playing chunk at', this.nextStartTime, 'duration:', audioBuffer.duration, 'buffer_size:', audioBuffer.length);
+            source.start(this.nextStartTime);
+            this.nextStartTime += audioBuffer.duration;
+        } catch (err) {
+            console.error('[AudioStreamer] Error playing chunk:', err);
+            throw err;
         }
+    }
 
-        const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, 24000);
-        audioBuffer.getChannelData(0).set(float32Data);
-
-        const source = this.audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(this.audioContext.destination);
-
-        const currentTime = this.audioContext.currentTime;
-        if (this.nextStartTime < currentTime) {
-            this.nextStartTime = currentTime;
+    public async playChunk(base64: string) {
+        if (!this.isAcceptingChunks) {
+            console.warn('[AudioStreamer] Not accepting new chunks');
+            return;
         }
+        // Queue the chunk and process sequentially
+        this.chunkQueue.push(base64);
+        await this.processQueue();
+    }
 
-        source.start(this.nextStartTime);
-        this.nextStartTime += audioBuffer.duration;
+    public stopAcceptingChunks() {
+        console.log('[AudioStreamer] Stopped accepting new chunks, current queue size:', this.chunkQueue.length);
+        this.isAcceptingChunks = false;
     }
 
     public stop() {
+        console.log('[AudioStreamer] Stopping, context state:', this.audioContext.state);
+        this.isAcceptingChunks = false;
+        this.chunkQueue = []; // Clear any queued chunks
         if (this.audioContext.state !== 'closed') {
-            this.audioContext.close();
+            try {
+                this.audioContext.close();
+            } catch (err) {
+                console.error('[AudioStreamer] Error closing context:', err);
+            }
         }
+        this.nextStartTime = null;
+        this.isInitialized = false;
+        this.isProcessing = false;
     }
 }
 
 export function useMortgageSocket(url: string) {
     const [socket, setSocket] = useState<WebSocket | null>(null);
     const [connected, setConnected] = useState(false);
-    const [shouldConnect, setShouldConnect] = useState(false);
+    const [shouldConnect, setShouldConnect] = useState(true);
     const [messages, setMessages] = useState<{ role: 'user' | 'assistant', text: string, image?: string }[]>([]);
     const [voicePlaying, setVoicePlaying] = useState(false);
     const [a2uiState, setA2uiState] = useState<A2UIPayload | null>(null);
@@ -88,9 +160,20 @@ export function useMortgageSocket(url: string) {
     }, [hookId]);
 
     const stopAudioBuffer = useCallback(() => {
+        // Gracefully stop accepting new chunks and let current playback finish
         if (streamerRef.current) {
-            streamerRef.current.stop();
-            streamerRef.current = null;
+            console.log('[Hook] Gracefully stopping audio playback, streamer exists');
+            streamerRef.current.stopAcceptingChunks();
+            // Clean up after playback has had time to finish (don't close immediately)
+            setTimeout(() => {
+                if (streamerRef.current) {
+                    console.log('[Hook] Closing audio streamer');
+                    streamerRef.current.stop();
+                    streamerRef.current = null;
+                }
+            }, 3000); // 3 second timeout to allow current chunks to finish
+        } else {
+            console.log('[Hook] stopAudioBuffer called but no streamer exists');
         }
         setVoicePlaying(false);
     }, []);
@@ -141,7 +224,9 @@ export function useMortgageSocket(url: string) {
             } else if (type === 'server.agent.thinking') {
                 setThinkingState(payload.state);
             } else if (type === 'server.voice.audio') {
+                console.log('[WebSocket] Received server.voice.audio, streamer exists:', !!streamerRef.current);
                 if (!streamerRef.current) {
+                    console.log('[WebSocket] Creating new AudioStreamer');
                     streamerRef.current = new AudioStreamer();
                     setVoicePlaying(true);
                     if (requestStartRef.current) {
@@ -149,9 +234,13 @@ export function useMortgageSocket(url: string) {
                     }
                 }
                 if (payload.data) {
-                    streamerRef.current.playChunk(payload.data);
+                    console.log('[WebSocket] Queuing audio chunk, size:', payload.data.length);
+                    streamerRef.current.playChunk(payload.data).catch(err => {
+                        console.error('[WebSocket] Error playing audio chunk:', err);
+                    });
                 }
             } else if (type === 'server.voice.stop') {
+                console.log('[WebSocket] Received server.voice.stop, streamer exists:', !!streamerRef.current);
                 setTimeout(() => setVoicePlaying(false), 2000);
             } else if (type === 'server.a2ui.patch') {
                 if (!uiPatchLatencyRef.current && requestStartRef.current) {
@@ -198,7 +287,7 @@ export function useMortgageSocket(url: string) {
         setTtfb(null);
         setUiPatchLatency(null);
         setVoiceLatency(null);
-        stopAudioBuffer();
+        // Don't stop audio buffer - let the playback finish naturally
         if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({
                 type: 'client.text',
@@ -219,7 +308,7 @@ export function useMortgageSocket(url: string) {
         setVoiceLatency(null);
 
         if (voicePlaying) {
-            stopAudioBuffer();
+            // Send interrupt to server - don't close audio locally, let it finish
             socket.send(JSON.stringify({
                 type: 'client.audio.interrupt',
                 sessionId: clientSessionIdRef.current
@@ -323,6 +412,16 @@ registerProcessor('pcm16-processor', PCM16Processor);
         }
     };
 
+    const sendModeUpdate = (newMode: 'text' | 'voice') => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        console.log('[Hook] Sending mode update:', newMode);
+        socket.send(JSON.stringify({
+            type: 'client.mode.update',
+            sessionId: clientSessionIdRef.current,
+            payload: { mode: newMode }
+        }));
+    };
+
     return {
         connected,
         messages,
@@ -333,6 +432,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
         sendText,
         sendAudioStart,
         sendAudioStop,
+        sendModeUpdate,
         connect,
         disconnect,
         latency: { ttfb, uiPatchLatency, voiceLatency }

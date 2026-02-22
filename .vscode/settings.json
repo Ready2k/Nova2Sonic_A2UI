@@ -1,0 +1,13 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /Users/jamescregeen/A2UI_S2S && bash manage\\.sh stop && sleep 2 && bash manage\\.sh start && sleep 4 && bash manage\\.sh status$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "npm run build": true,
+        "/^bash manage\\.sh stop && sleep 2 && bash manage\\.sh start && sleep 4 && bash manage\\.sh status$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
