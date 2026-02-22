@@ -41,6 +41,7 @@ class MortgageIntent(BaseModel):
     address: Optional[str] = Field(description="The address of the property", default=None)
     lat: Optional[float] = Field(description="Latitude of the property", default=None)
     lng: Optional[float] = Field(description="Longitude of the property", default=None)
+    notes: Optional[str] = Field(description="Any personal life context or feelings the user shared (e.g. 'excited about first home', 'nervous about rates')", default=None)
 
 def interpret_intent(state: AgentState):
     transcript = state.get("transcript", "").strip()
@@ -89,6 +90,7 @@ def interpret_intent(state: AgentState):
                 "Rules:\n"
                 "- Interpret short answers (yes/no/yeah/nope) using the context above.\n"
                 "- For money amounts, extract the number (e.g. '400k' = 400000, '400 thousand' = 400000).\n"
+                "- If the user shares life details (new baby, relocation, retirement), capture a brief summary in the 'notes' field.\n"
                 "- Do NOT change fields that already have values unless the user explicitly corrects them.\n"
                 "- If the user is just being conversational ('okay', 'go for it'), do NOT change any fields.\n"
             )
@@ -176,18 +178,31 @@ def render_missing_inputs(state: AgentState):
                 llm = ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION", "us-east-1"))
                 
                 system_prompt = (
-                    "You are a helpful Barclays Mortgage Assistant. Your goal is to ask the user for a specific piece of information "
-                    "in a natural, conversational way. Be brief (1-2 sentences). "
-                    f"Current journey stage: {category}. "
+                    "You are a sophisticated Barclays Mortgage Specialist. You provide world-class, "
+                    "supportive, and empathetic service. \n\n"
+                    "Your personality:\n"
+                    "- Warm, professional, and reassuring (like an expert human advisor).\n"
+                    "- Acknowledge the user's specific context (e.g., excitement, relocation, or savings goals).\n"
+                    "- IMPORTANT: Use the personal details in the 'NOTES' below to make the conversation feel human and memorable.\n"
+                    "- Explain the 'why' behind questions occasionally to add professional depth.\n"
+                    f"Current Product Flow: {category}\n"
+                    "Goal: Collect one specific detail while maintaining a premium conversational flow."
                 )
                 
-                user_msg = f"Conversation history: {messages[-4:]}\n"
-                user_msg += f"The user just said: '{state.get('transcript')}'\n"
-                
-                if target_field == "category":
-                    user_msg += "Nudge the user to select one of the mortgage categories shown on screen."
-                else:
-                    user_msg += f"I need to find out: {target_field}. Ask the user for this information, acknowledging what they just said if appropriate."
+                messages = state.get("messages", [])
+                notes = intent.get("notes", "No personal context shared yet.")
+                user_msg = (
+                    f"NOTES ON USER: {notes}\n"
+                    f"HISTORY: {messages[-4:]}\n"
+                    f"USER JUST SAID: '{state.get('transcript')}'\n"
+                    f"FIELD NEEDED: {target_field}\n\n"
+                    "INSTRUCTIONS:\n"
+                    "1. If the user asked a question (e.g. 'what does that mean?'), explain it first (e.g. 'Loan balance is the amount you want to borrow').\n"
+                    "2. Acknowledge what the user just shared with specifically tailored empathy.\n"
+                    "3. If 'NOTES ON USER' has details, subtly reference them to show you are listening.\n"
+                    "4. Ask for the 'field needed' elegantly.\n"
+                    "5. Keep it to 2-3 sentences max."
+                )
 
                 response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
                 msg = response.content
