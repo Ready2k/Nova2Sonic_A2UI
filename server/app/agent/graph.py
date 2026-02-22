@@ -1,14 +1,20 @@
-
 import os
-from typing import Dict, Any, List, Optional, TypedDict
+import logging
+from typing import Dict, Any, List, Optional, TypedDict, Annotated
+import operator
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
 from .tools import calculate_ltv, fetch_mortgage_products, recalculate_monthly_payment
 
+logger = logging.getLogger(__name__)
+
+def append_reducer(a: list, b: list) -> list:
+    return a + b
+
 class AgentState(TypedDict):
     mode: str
     transcript: str
-    messages: List[Dict[str, Any]]
+    messages: Annotated[List[Dict[str, Any]], append_reducer]
     intent: Dict[str, Any]
     ltv: float
     products: List[Dict[str, Any]]
@@ -16,12 +22,13 @@ class AgentState(TypedDict):
     ui: Dict[str, Any]
     errors: Optional[Dict[str, Any]]
     pendingAction: Optional[Dict[str, Any]]
-    outbox: List[Dict[str, Any]]
+    outbox: Annotated[List[Dict[str, Any]], append_reducer]
     existing_customer: Optional[bool]
     property_seen: Optional[bool]
 
 def ingest_input(state: AgentState):
-    return state 
+    logger.info(f"NODE: ingest_input - transcript='{state.get('transcript')}'")
+    return {} 
 
 class MortgageIntent(BaseModel):
     propertyValue: Optional[int] = Field(description="The value of the property in GBP", default=None)
@@ -33,6 +40,7 @@ class MortgageIntent(BaseModel):
 
 def interpret_intent(state: AgentState):
     transcript = state.get("transcript", "").strip()
+    logger.info(f"NODE: interpret_intent - input='{transcript}'")
     intent = state.get("intent", {}) or {}
     messages = state.get("messages", [])
     
@@ -128,8 +136,8 @@ def render_missing_inputs(state: AgentState):
     elif not intent.get("loanBalance"): missing.append("loan balance")
     elif not intent.get("fixYears"): missing.append("fixed term (years)")
 
-    outbox = list(state.get("outbox", []))
-    messages = list(state.get("messages", []))
+    new_outbox = []
+    new_messages = []
     
     # Map each missing field to a short, single-sentence question.
     # When a category was just selected, prefix with a brief acknowledgment.
@@ -137,9 +145,13 @@ def render_missing_inputs(state: AgentState):
     just_selected = state.get("pendingAction", {}) and state.get("pendingAction", {}).get("data", {}).get("action") == "select_category"
     
     if missing:
+        logger.info(f"NODE: render_missing_inputs - missing={missing}, transcript='{state.get('transcript')}'")
         if missing[0] == "category":
-            # Landing screen — no voice prompt, the visual grid is enough
-            pass
+            # Landing screen — if user typed something (like 'hi'), nudge them to pick
+            if state.get("transcript"):
+                msg = "Hello! Please select one of the mortgage categories below to get started."
+                new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+                new_messages.append({"role": "assistant", "text": msg})
         else:
             first_question_map = {
                 "whether you already bank with Barclays": "Do you already bank with Barclays?",
@@ -155,8 +167,8 @@ def render_missing_inputs(state: AgentState):
             else:
                 msg = q
             
-            outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-            messages.append({"role": "assistant", "text": msg})
+            new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+            new_messages.append({"role": "assistant", "text": msg})
         
     intent = state.get("intent", {})
     category = intent.get("category")
@@ -190,10 +202,10 @@ def render_missing_inputs(state: AgentState):
             {"id": "btn_moving", "component": "Button", "text": "Moving home", "data": {"action": "select_category", "category": "Moving home"}}
         ]
         payload = {"version": "v0.9", "updateComponents": {"surfaceId": "main", "components": components}}
-        outbox.append({"type": "server.a2ui.patch", "payload": payload})
+        new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
         ui_state = dict(state.get("ui", {}))
         ui_state["state"] = "LOADING"
-        return {"outbox": outbox, "ui": ui_state, "messages": messages, "transcript": ""}
+        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
         
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
@@ -240,12 +252,12 @@ def render_missing_inputs(state: AgentState):
         }
     }
     
-    outbox.append({"type": "server.a2ui.patch", "payload": payload})
+    new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
         
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "LOADING" # Meaning it's incomplete
     
-    return {"outbox": outbox, "ui": ui_state, "messages": messages, "transcript": ""}
+    return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
 
 def call_mortgage_tools(state: AgentState):
     intent = state.get("intent", {})
@@ -269,7 +281,8 @@ def call_mortgage_tools(state: AgentState):
 def render_products_a2ui(state: AgentState):
     ltv = state.get("ltv", 0)
     products = state.get("products", [])
-    outbox = list(state.get("outbox", []))
+    new_outbox = []
+    new_messages = []
 
     components = [
         {"id": "root", "component": "Column", "children": ["header_text"]}
@@ -294,19 +307,18 @@ def render_products_a2ui(state: AgentState):
         }
     }
     
-    outbox.append({"type": "server.a2ui.patch", "payload": payload})
+    new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
     
-    messages = list(state.get("messages", []))
     if state.get("ui", {}).get("state") != "COMPARISON":
         msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options."
-        if state.get("mode") != "voice":
-            outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-            messages.append({"role": "assistant", "text": msg})
+        # Always nudge in text log if new products shown
+        new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+        new_messages.append({"role": "assistant", "text": msg})
     
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
     
-    return {"outbox": outbox, "ui": ui_state, "messages": messages, "transcript": ""}
+    return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
 
 def recalculate_and_patch(state: AgentState):
     intent = state.get("intent", {})
@@ -314,7 +326,7 @@ def recalculate_and_patch(state: AgentState):
     products = state.get("products", [])
     ty = intent.get("termYears", 25)
     
-    outbox = list(state.get("outbox", []))
+    new_outbox = []
     
     for p in products:
         calc = recalculate_monthly_payment(lb, p["rate"], ty, p["fee"])
@@ -332,11 +344,11 @@ def recalculate_and_patch(state: AgentState):
         }
     }
     
-    outbox.append({"type": "server.a2ui.patch", "payload": payload})
+    new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
     
-    return {"outbox": outbox, "ui": ui_state, "products": products}
+    return {"outbox": new_outbox, "ui": ui_state, "products": products, "transcript": ""}
 
 def handle_ui_action(state: AgentState):
     action = state.get("pendingAction")
@@ -388,7 +400,8 @@ def render_summary_a2ui(state: AgentState):
     product_id = selection.get("productId")
     products = state.get("products", [])
     selected_prod = next((p for p in products if p["id"] == product_id), None)
-    outbox = list(state.get("outbox", []))
+    new_outbox = []
+    new_messages = []
     
     components = [
         {"id": "root", "component": "Column", "children": ["summary_header", "summary_card", "disclaimer", "aip_button"]},
@@ -405,21 +418,20 @@ def render_summary_a2ui(state: AgentState):
             "components": components
         }
     }
-    outbox.append({"type": "server.a2ui.patch", "payload": payload})
+    new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
     
     msg = "Great choice. I've prepared your summary. You can review it on screen and confirm if you want to proceed."
-    outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-    
-    messages = list(state.get("messages", []))
-    messages.append({"role": "assistant", "text": msg})
+    new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+    new_messages.append({"role": "assistant", "text": msg})
     
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "SUMMARY"
     
-    return {"outbox": outbox, "ui": ui_state, "messages": messages, "transcript": ""}
+    return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
 
 def confirm_application(state: AgentState):
-    outbox = list(state.get("outbox", []))
+    new_outbox = []
+    new_messages = []
     components = [
         {"id": "root", "component": "Column", "children": ["confirmed_header", "reset_button"]},
         {"id": "confirmed_header", "component": "Text", "text": "Application Started", "variant": "h1"},
@@ -432,16 +444,14 @@ def confirm_application(state: AgentState):
             "components": components
         }
     }
-    outbox.append({"type": "server.a2ui.patch", "payload": payload})
+    new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
     msg = "Fantastic, your application has been started successfully."
-    outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
-    
-    messages = list(state.get("messages", []))
-    messages.append({"role": "assistant", "text": msg})
+    new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+    new_messages.append({"role": "assistant", "text": msg})
     
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "CONFIRMED"
-    return {"outbox": outbox, "ui": ui_state, "messages": messages, "transcript": ""}
+    return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
 
 def root_router(state: AgentState):
     if state.get("pendingAction"):
@@ -470,7 +480,7 @@ def ui_action_router(state: AgentState):
         return "confirm_application"
     elif action_id in ("reset_flow", "select_category"):
         return "render_missing_inputs"
-    return END
+    return "clear_pending_action"
 
 def start_router(state: AgentState):
     if state.get("pendingAction"):
@@ -506,10 +516,10 @@ workflow.add_edge(START, "ingest_input")
 workflow.add_conditional_edges("ingest_input", start_router)
 workflow.add_conditional_edges("interpret_intent", intent_router)
 
-workflow.add_edge("render_missing_inputs", END)
+workflow.add_edge("render_missing_inputs", "clear_pending_action")
 
 workflow.add_edge("call_mortgage_tools", "render_products_a2ui")
-workflow.add_edge("render_products_a2ui", END)
+workflow.add_edge("render_products_a2ui", "clear_pending_action")
 
 workflow.add_conditional_edges("handle_ui_action", ui_action_router)
 

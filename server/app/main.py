@@ -14,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from .models import WebSocketMessage, ActionPayload
 from .agent.graph import app_graph, AgentState
 from .nova_sonic import NovaSonicSession
-from .chat_endpoint import chat_ws_endpoint
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,7 +32,7 @@ sessions: Dict[str, dict] = {}
 
 def create_initial_state() -> AgentState:
     return {
-        "mode": "voice",
+        "mode": "text",
         "transcript": "",
         "messages": [],
         "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25},
@@ -97,16 +96,20 @@ async def process_outbox(websocket: WebSocket, sid: str):
             # Echo to chat transcript immediately
             await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
             
-            if sonic_active:
-                # Nova Sonic handles speaking — don't compete with a separate TTS process
-                logger.info(f"Skipping TTS (Nova Sonic active)")
-            elif not sessions[sid].get("voice_playing"):
+            # Skip talking if in text mode
+            if state.get("mode") == "text":
+                logger.info("Skipping TTS (Text Only mode)")
+                continue
+
+            # Always speak if not already playing voice from another source
+            if not sessions[sid].get("voice_playing"):
                 # No active voice session — fire TTS as background task (non-blocking)
                 sessions[sid]["voice_playing"] = True
                 asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
     
-    # Clear outbox
+    # Clear outbox and thinking state
     state["outbox"] = []
+    await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
 
 
 @app.websocket("/ws")
@@ -200,6 +203,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     traceback.print_exc()
                 
             if msg_type == "client.audio.start":
+                if state.get("mode") == "text":
+                    logger.warning(f"Rejecting audio start for {sid} - in Text Only mode")
+                    continue
+
+                if session_data["sonic"]:
+                    try:
+                        await session_data["sonic"].end_session()
+                    except: pass
+                
                 sonic = NovaSonicSession(
                     on_audio_chunk=handle_audio_chunk, 
                     on_text_chunk=lambda t: handle_text_chunk(t, False),
@@ -313,6 +325,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     session_data["sonic"] = None
                 session_data["voice_playing"] = False
                 await send_msg(websocket, sid, "server.voice.stop")
+                logger.info(f"--- Voice interrupted and stopped for {sid} ---")
                 
             elif msg_type == "client.text":
                 transcript = payload.get("text", "")
@@ -321,13 +334,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 state["transcript"] = transcript
                 state["mode"] = "text"
                 
+                # If Nova Sonic was active, kill it — we are in Text Only mode now
+                if session_data.get("sonic"):
+                    try:
+                        asyncio.create_task(session_data["sonic"].end_session())
+                        session_data["sonic"] = None
+                    except: pass
+                
                 msg_obj = {"role": "user", "text": transcript}
                 if image_b64:
                     if image_b64.startswith("data:"): image_b64 = image_b64.split(",", 1)[1]
                     msg_obj["image"] = image_b64
                 state["messages"].append(msg_obj)
                 
-                await send_msg(websocket, sid, "server.transcript.final", {"text": transcript})
+                await send_msg(websocket, sid, "server.transcript.final", {"text": transcript, "image": image_b64})
                 await send_msg(websocket, sid, "server.agent.thinking", {"state": "rendering_ui"})
                 
                 try:
@@ -338,6 +358,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     import traceback
                     logger.error(f"Error in LangGraph matching (text): {e}")
                     traceback.print_exc()
+                    await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
                     
             elif msg_type == "client.ui.action":
                 action_id = payload.get("id")
@@ -350,9 +371,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     current_state = sessions[sid]["state"]
                     current_state["pendingAction"] = {"id": action_id, "data": data}
                     
-                    res = await asyncio.to_thread(app_graph.invoke, current_state)
-                    sessions[sid]["state"] = res
-                    await process_outbox(websocket, sid)
+                    try:
+                        res = await asyncio.to_thread(app_graph.invoke, current_state)
+                        sessions[sid]["state"] = res
+                        await process_outbox(websocket, sid)
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"Error in UI action: {e}")
+                        traceback.print_exc()
+                        await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
                 except Exception as e:
                     import traceback
                     logger.error(f"Error handling UI action '{action_id}': {e}")
@@ -365,7 +392,3 @@ async def websocket_endpoint(websocket: WebSocket):
             del sessions[session_id]
 
 
-# ─── Chat-only endpoint (no voice / Nova Sonic) ───────────────────────────────
-@app.websocket("/ws/chat")
-async def chat_websocket(websocket: WebSocket):
-    await chat_ws_endpoint(websocket)

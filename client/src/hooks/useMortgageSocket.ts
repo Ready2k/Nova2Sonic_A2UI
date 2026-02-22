@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useId } from 'react';
+import { A2UIPayload } from '../components/A2Renderer';
 
 export interface ActionPayload {
     actionId: string;
@@ -58,9 +59,9 @@ export function useMortgageSocket(url: string) {
     const [socket, setSocket] = useState<WebSocket | null>(null);
     const [connected, setConnected] = useState(false);
     const [shouldConnect, setShouldConnect] = useState(true);
-    const [transcript, setTranscript] = useState<{ text: string, role: string } | null>(null);
+    const [messages, setMessages] = useState<{ role: 'user' | 'assistant', text: string, image?: string }[]>([]);
     const [voicePlaying, setVoicePlaying] = useState(false);
-    const [a2uiState, setA2uiState] = useState<Record<string, unknown> | null>(null);
+    const [a2uiState, setA2uiState] = useState<A2UIPayload | null>(null);
     const [thinkingState, setThinkingState] = useState<string | null>(null);
 
     const [ttfb, setTtfb] = useState<number | null>(null);
@@ -131,7 +132,12 @@ export function useMortgageSocket(url: string) {
             if (type === 'server.ready') {
                 console.log('Server is ready');
             } else if (type === 'server.transcript.final') {
-                setTranscript({ text: payload.text, role: payload.role || 'user' });
+                const role = (payload.role || 'user') as 'user' | 'assistant';
+                setMessages(prev => {
+                    const last = prev[prev.length - 1];
+                    if (last && last.text === payload.text && last.role === role) return prev;
+                    return [...prev, { text: payload.text, role, image: payload.image }];
+                });
             } else if (type === 'server.agent.thinking') {
                 setThinkingState(payload.state);
             } else if (type === 'server.voice.audio') {
@@ -319,7 +325,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
 
     return {
         connected,
-        transcript,
+        messages,
         voicePlaying,
         a2uiState,
         thinkingState,

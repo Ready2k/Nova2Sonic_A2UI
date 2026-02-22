@@ -3,14 +3,14 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import Image from 'next/image';
 import { useMortgageSocket } from '../hooks/useMortgageSocket';
-import A2Renderer from '../components/A2Renderer';
+import A2Renderer, { A2UIPayload } from '../components/A2Renderer';
 import LatencyHud from '../components/LatencyHud';
 
 export default function Home() {
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
   const {
     connected,
-    transcript,
+    messages,
     voicePlaying,
     a2uiState,
     thinkingState,
@@ -23,10 +23,9 @@ export default function Home() {
     latency
   } = useMortgageSocket(wsUrl);
 
-  const [mode, setMode] = useState<'text' | 'voice'>('voice');
+  const [mode, setMode] = useState<'text' | 'voice'>('text');
   const [textInput, setTextInput] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [userMessages, setUserMessages] = useState<{ role: 'user' | 'assistant', text: string, image?: string }[]>([]);
   const [isRecording, setIsRecording] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -34,16 +33,7 @@ export default function Home() {
   useEffect(() => {
     // Scroll to bottom of message log when new message is added
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [userMessages]);
-
-  const displayedMessages = useMemo(() => {
-    if (!transcript?.text) return userMessages;
-    const lastMsg = userMessages[userMessages.length - 1];
-    if (lastMsg && lastMsg.text === transcript.text && lastMsg.role === transcript.role) {
-      return userMessages;
-    }
-    return [...userMessages, { role: transcript.role as 'user' | 'assistant', text: transcript.text }];
-  }, [userMessages, transcript]);
+  }, [messages]);
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -75,7 +65,6 @@ export default function Home() {
     e.preventDefault();
     if (textInput.trim() || selectedImage) {
       sendText(textInput, selectedImage || undefined);
-      setUserMessages(prev => [...prev, { role: 'user', text: textInput, image: selectedImage || undefined }]);
       setTextInput('');
       setSelectedImage(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -105,7 +94,7 @@ export default function Home() {
               className={`px-5 py-2 rounded-md text-sm font-bold transition-all shadow-sm ${mode === 'text' ? 'bg-white text-blue-700 ring-1 ring-gray-200' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-200/50'}`}
               onClick={() => setMode('text')}
             >
-              Multimodal Text
+              Text Only
             </button>
           </div>
           {connected ? (
@@ -139,14 +128,14 @@ export default function Home() {
 
               {/* Chat Message Log */}
               <div className="flex-1 overflow-y-auto w-full pr-2 space-y-4 mb-4 mt-2 no-scrollbar">
-                {displayedMessages.length === 0 && !transcript && !thinkingState && !voicePlaying && (
+                {messages.length === 0 && !thinkingState && !voicePlaying && (
                   <div className="h-full flex items-center justify-center text-center">
                     <div className="text-gray-400 text-sm font-semibold tracking-wide">
                       {mode === 'voice' ? 'Ready for your voice command...' : 'Attach a photo or type a message below...'}
                     </div>
                   </div>
                 )}
-                {displayedMessages.map((msg, i) => (
+                {messages.map((msg, i) => (
                   <div key={i} className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                     {msg.image && (
                       <Image src={msg.image} alt="User Upload" width={128} height={128} className="w-32 h-32 object-cover rounded-xl shadow-sm border border-gray-200" unoptimized />
@@ -174,12 +163,13 @@ export default function Home() {
                       <div className="flex items-end h-4 gap-1 justify-center">
                         <div className="w-1 bg-blue-500 rounded-full animate-pulse h-2" style={{ animationDelay: '0ms' }}></div>
                         <div className="w-1 bg-indigo-500 rounded-full animate-pulse h-4" style={{ animationDelay: '100ms' }}></div>
-                        <div className="w-1 bg-blue-400 rounded-full animate-pulse h-3" style={{ animationDelay: '200ms' }}></div>
+                        <div className="w-1 bg-blue-600 rounded-full animate-pulse h-3" style={{ animationDelay: '200ms' }}></div>
                       </div>
-                      <span className="text-xs text-gray-700 font-bold uppercase tracking-widest">Speaking</span>
+                      <span className="text-xs text-blue-600 font-bold uppercase tracking-widest">Assistant Speaking</span>
                     </div>
                   </div>
                 )}
+
                 <div ref={logsEndRef} />
               </div>
 
