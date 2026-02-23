@@ -297,9 +297,13 @@ async function main() {
         let chunksEmittedInBlock = 0;
         let currentRole = null;
         let currentContentType = null;
-        let currentGenerationStage = 'FINAL';
+        let currentGenerationStage = 'SPECULATIVE';
+        let lastKnownGenerationStage = 'SPECULATIVE';
         let inAssistantAudioBlock = false;
-        let speculativeChunks = []; // Buffer to hold speculative chunks in case no FINAL follows
+        let skipCurrentBlock = false;
+        let hasEmittedFinalBlock = false;
+        let speculativeChunks = []; // Buffer for current speculative block
+        let speculativeFallbackChunks = []; // Prompt-level fallback if stream has no FINAL audio
 
         for await (const event of response.body) {
             if (!event.chunk?.bytes) continue;
@@ -311,14 +315,23 @@ async function main() {
                 currentRole = eventData.contentStart.role;
                 currentContentType = eventData.contentStart.type;
 
-                const stage = extractGenerationStage(eventData.contentStart);
-                if (stage) currentGenerationStage = stage;
-
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO') {
+                    const stage = extractGenerationStage(eventData.contentStart);
+                    if (stage) {
+                        currentGenerationStage = stage;
+                        lastKnownGenerationStage = stage;
+                    } else {
+                        // Missing stage metadata is common; inherit last known stage for this prompt.
+                        currentGenerationStage = lastKnownGenerationStage;
+                    }
+
+                    // Nova can emit a second FINAL pass with duplicate audio. Keep only the first FINAL pass.
+                    skipCurrentBlock = hasEmittedFinalBlock && currentGenerationStage === 'FINAL';
+
                     inAssistantAudioBlock = true;
                     speculativeChunks = []; // Reset buffer for new block
                     chunksEmittedInBlock = 0; // Reset count for new block
-                    console.error(`[TTS DEBUG] ${nowIso()} Enter ASSISTANT AUDIO block stage=${currentGenerationStage}`);
+                    console.error(`[TTS DEBUG] ${nowIso()} Enter ASSISTANT AUDIO block stage=${currentGenerationStage} skip=${skipCurrentBlock}`);
                 }
             }
 
@@ -327,11 +340,16 @@ async function main() {
 
                 if (inAssistantAudioBlock) {
                     if (currentGenerationStage === 'FINAL') {
+                        if (skipCurrentBlock) {
+                            continue;
+                        }
                         chunksEmittedInBlock++;
                         chunksEmittedTotal++;
                         console.log(`AUDIO_CHUNK:${audioData}`);
                     } else if (currentGenerationStage === 'SPECULATIVE') {
-                        // Buffer speculative chunks just in case this is the only pass we get
+                        // Keep speculative audio only as prompt-level fallback.
+                        // We avoid emitting speculative blocks inline because FINAL blocks may follow,
+                        // which would cause duplicate playback.
                         speculativeChunks.push(audioData);
                     }
                 }
@@ -339,20 +357,16 @@ async function main() {
 
             if (eventData.contentEnd) {
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO' && inAssistantAudioBlock) {
-                    // Fallback: If the block ended and we haven't emitted ANY final chunks,
-                    // but we have speculative ones, emit the speculative ones now.
-                    // Only do this if no final chunks have been emitted globally — otherwise
-                    // a SPECULATIVE block followed by a FINAL block would play the audio twice.
-                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0 && chunksEmittedTotal === 0) {
-                        console.error(`[TTS DEBUG] ${nowIso()} Fallback: Emitting ${speculativeChunks.length} speculative chunks (no FINAL pass received)`);
-                        for (const chunk of speculativeChunks) {
-                            chunksEmittedInBlock++;
-                            chunksEmittedTotal++;
-                            console.log(`AUDIO_CHUNK:${chunk}`);
-                        }
+                    // Do not emit speculative chunks inline. Accumulate as fallback only.
+                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
+                        speculativeFallbackChunks.push(...speculativeChunks);
                     }
-                    console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage}`);
+                    if (!skipCurrentBlock && currentGenerationStage === 'FINAL' && chunksEmittedInBlock > 0) {
+                        hasEmittedFinalBlock = true;
+                    }
+                    console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage} skip=${skipCurrentBlock}`);
                     inAssistantAudioBlock = false;
+                    skipCurrentBlock = false;
                     speculativeChunks = [];
                 }
                 currentRole = null;
@@ -360,9 +374,11 @@ async function main() {
             }
 
             if (eventData.promptEnd) {
-                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Total emitted chunks=${chunksEmittedTotal}`);
+                // Prompt end can arrive before all buffered audioOutput events are drained.
+                // Do not break early; keep consuming the stream until it naturally ends.
+                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Continuing to drain stream. Total emitted chunks=${chunksEmittedTotal}`);
                 finishSignal();
-                break;
+                continue;
             }
 
             if (eventData.internalServerException) {
@@ -381,8 +397,16 @@ async function main() {
             }
         }
 
+        if (chunksEmittedTotal === 0 && speculativeFallbackChunks.length > 0) {
+            console.error(`[TTS DEBUG] ${nowIso()} FINAL audio missing; emitting ${speculativeFallbackChunks.length} speculative fallback chunks`);
+            for (const chunk of speculativeFallbackChunks) {
+                chunksEmittedTotal++;
+                console.log(`AUDIO_CHUNK:${chunk}`);
+            }
+        }
+
         if (!canFinish) {
-            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${audioChunkCount}`);
+            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${chunksEmittedTotal}`);
             finishSignal();
         }
     } catch (e) {
