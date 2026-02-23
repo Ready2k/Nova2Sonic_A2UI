@@ -24,6 +24,9 @@ COPY . .
 ARG NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
 ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
 
+# Enable standalone output only for Docker builds (avoids webpack context issues in local dev)
+ENV NEXT_STANDALONE=1
+
 RUN npm run build
 
 # ── Stage 3: production runner ────────────────────────────────────────────────
