@@ -15,7 +15,8 @@ from .models import WebSocketMessage, ActionPayload
 from .agent.graph import app_graph, AgentState
 from .nova_sonic import NovaSonicSession
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+
 
 logger = logging.getLogger(__name__)
 
@@ -232,10 +233,14 @@ async def websocket_endpoint(websocket: WebSocket):
             async def handle_audio_chunk(chunk_b64):
                 await send_msg(websocket, sid, "server.voice.audio", {"data": chunk_b64})
 
-            async def handle_text_chunk(text, is_user=False):
+            async def handle_text_chunk(text, is_user=False, is_final=False):
                 if is_user:
-                    logger.debug(f"APPENDING USER TEXT: {text}")
-                    session_data["user_transcripts"].append(text)
+                    if is_final:
+                        logger.info(f"FINAL USER TEXT RECEIVED: {text}")
+                        session_data["user_transcripts"] = [text]
+                    else:
+                        logger.debug(f"APPENDING USER TEXT: {text}")
+                        session_data["user_transcripts"].append(text)
                     # Send partial transcript to client for real-time feedback
                     await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
                 else:
@@ -244,8 +249,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
 
             async def handle_finished():
-                # ALWAYS read the latest state — never use the stale closure variable
-                current_state = sessions[sid]["state"]
+                # Use local session_data reference to avoid KeyErrors if session is cleaned up
+                current_state = session_data["state"]
                 
                 if session_data.get("handling_finished"):
                     logger.warning(f"Nova Sonic: handle_finished already in progress for {sid}, skipping duplicate.")
@@ -273,7 +278,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     try:
                         res = await asyncio.to_thread(app_graph.invoke, current_state)
-                        sessions[sid]["state"] = res
+                        if sid in sessions:
+                            sessions[sid]["state"] = res
                         await process_outbox(websocket, sid)
                     except Exception as e:
                         import traceback
@@ -292,11 +298,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Nova Sonic is used for STT transcription only.
                 # The non-bidirectional API returns only assistant-role text (the model's echo of the user's speech).
                 # We capture all text output and treat it as the user's spoken words.
-                async def _on_text_chunk(text, is_user):
-                    await handle_text_chunk(text, is_user=True)
+                async def _on_text_chunk(text, is_user=False, is_final=False):
+                    await handle_text_chunk(text, is_user=True, is_final=is_final)
 
                 sonic = NovaSonicSession(
-                    on_audio_chunk=lambda x: None,  # Suppress Nova Sonic's own audio output
+                    on_audio_chunk=lambda x, **kw: None,  # Suppress Nova Sonic's own audio output
                     on_text_chunk=_on_text_chunk,
                     on_finished=handle_finished
                 )
@@ -366,7 +372,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 try:
                     res = await asyncio.to_thread(app_graph.invoke, state)
-                    sessions[sid]["state"] = res
+                    if sid in sessions:
+                        sessions[sid]["state"] = res
                     await process_outbox(websocket, sid)
                 except Exception as e:
                     import traceback
@@ -387,7 +394,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     try:
                         res = await asyncio.to_thread(app_graph.invoke, current_state)
-                        sessions[sid]["state"] = res
+                        if sid in sessions:
+                            sessions[sid]["state"] = res
                         await process_outbox(websocket, sid)
                     except Exception as e:
                         import traceback
@@ -405,14 +413,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 state["mode"] = new_mode
                 
     except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for session {session_id}")
         if session_id in sessions:
             sess = sessions[session_id]
             # Cancel in-flight TTS so it doesn't try to send to the closed socket
             if sess.get("tts_task") and not sess["tts_task"].done():
+                logger.info(f"Cancelling pending TTS task for {session_id}")
                 sess["tts_task"].cancel()
             if sess.get("sonic"):
+                logger.info(f"Ending Nova Sonic session for {session_id}")
                 asyncio.create_task(sess["sonic"].end_session())
             del sessions[session_id]
+            logger.info(f"Session {session_id} removed from registry")
 
 if __name__ == "__main__":
     import uvicorn

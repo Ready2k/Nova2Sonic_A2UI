@@ -41,6 +41,7 @@ class NovaSonicSession:
                 stderr=asyncio.subprocess.PIPE,
             )
             self.reader_task = asyncio.create_task(self._read_stdout())
+            self.stderr_task = asyncio.create_task(self._read_stderr())
         except Exception as e:
             logger.error(f"Nova Sonic: failed to start STT process: {e}")
             self.is_active = False
@@ -57,23 +58,28 @@ class NovaSonicSession:
                 if decoded.startswith("TRANSCRIPT_PARTIAL:"):
                     partial = decoded[len("TRANSCRIPT_PARTIAL:"):].strip()
                     if partial and self.on_text_chunk:
-                        # We treat partials as is_user=True but maybe we need a separate flag?
-                        # For now, let's just pass it through.
-                        res = self.on_text_chunk(partial, is_user=True)
+                        res = self.on_text_chunk(partial, is_user=True, is_final=False)
                         if asyncio.iscoroutine(res): await res
                 elif decoded.startswith("TRANSCRIPT:"):
-                    # We already have the fragments in user_transcripts via PARTIAL
-                    # and handle_finished will join them.
-                    pass
+                    final = decoded[len("TRANSCRIPT:"):].strip()
+                    if final and self.on_text_chunk:
+                        res = self.on_text_chunk(final, is_user=True, is_final=True)
+                        if asyncio.iscoroutine(res): await res
             
-            # Read stderr for debug
-            if self.proc and self.proc.stderr:
-                err_data = await self.proc.stderr.read()
-                if err_data:
-                    for l in err_data.decode().splitlines():
-                        logger.debug(f"STT: {l}")
+            logger.info("Nova Sonic: STT process stdout closed")
         except Exception as e:
             logger.error(f"Nova Sonic: error in stdout reader: {e}")
+
+    async def _read_stderr(self):
+        """Task to stream stderr to logs in real-time."""
+        try:
+            while self.proc and self.proc.stderr:
+                line = await self.proc.stderr.readline()
+                if not line:
+                    break
+                logger.debug(f"Nova Sonic STT (stderr): {line.decode().strip()}")
+        except Exception as e:
+            logger.error(f"Nova Sonic: error in stderr reader: {e}")
 
     async def send_audio_chunk(self, base64_audio: str):
         if not self.is_active or not self.proc or not self.proc.stdin:
@@ -94,20 +100,36 @@ class NovaSonicSession:
 
         if self.proc and self.proc.stdin:
             try:
+                logger.info("Nova Sonic: closing STT stdin")
                 self.proc.stdin.close()
                 await self.proc.stdin.wait_closed()
-            except: pass
+            except Exception as e:
+                logger.warning(f"Nova Sonic: error closing stdin: {e}")
 
         if self.reader_task:
-            await self.reader_task
+            try:
+                # Wait up to 5 seconds for the process to finish after stdin close
+                await asyncio.wait_for(self.reader_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Nova Sonic: STT reader task timed out, force terminating")
+                if self.proc:
+                    try:
+                        self.proc.terminate()
+                    except: pass
+            except Exception as e:
+                logger.error(f"Nova Sonic: error waiting for reader: {e}")
 
         if self.proc:
             try:
-                await self.proc.wait()
-            except: pass
+                await asyncio.wait_for(self.proc.wait(), timeout=2.0)
+            except Exception:
+                if self.proc:
+                    try: self.proc.kill()
+                    except: pass
             self.proc = None
 
         if self.on_finished:
+            logger.info("Nova Sonic: triggering on_finished callback")
             await self.on_finished()
         
         self._is_processing = False

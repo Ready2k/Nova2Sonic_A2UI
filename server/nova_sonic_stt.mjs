@@ -209,7 +209,12 @@ async function main() {
         let userTranscript = '';
         let inUserTextBlock = false;
 
+        let finishedNormally = false;
+
+        let lastEventTime = Date.now();
+
         for await (const event of response.body) {
+            lastEventTime = Date.now();
             if (!event.chunk?.bytes) continue;
 
             const rawEvent = JSON.parse(Buffer.from(event.chunk.bytes).toString());
@@ -254,6 +259,7 @@ async function main() {
                 break;
             }
         }
+        finishedNormally = true;
 
         bedrockDoneResolver();
         console.log(`TRANSCRIPT:${userTranscript.trim()}`);

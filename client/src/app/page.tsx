@@ -24,11 +24,11 @@ export default function Home() {
     disconnect,
     volume,
     isRecording,
+    mode,
     latency
   } = useMortgageSocket(wsUrl);
 
 
-  const [mode, setMode] = useState<'text' | 'voice'>('text');
   const [textInput, setTextInput] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -38,13 +38,6 @@ export default function Home() {
     // Scroll to bottom of message log when new message is added
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
-
-  useEffect(() => {
-    // Notify server when client mode changes
-    if (connected) {
-      sendModeUpdate(mode);
-    }
-  }, [mode, connected, sendModeUpdate]);
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -94,13 +87,13 @@ export default function Home() {
           <div className="flex bg-gray-100 rounded-lg p-1.5 shadow-inner">
             <button
               className={`px-5 py-2 rounded-md text-sm font-bold transition-all shadow-sm ${mode === 'voice' ? 'bg-white text-blue-700 ring-1 ring-gray-200' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-200/50'}`}
-              onClick={() => setMode('voice')}
+              onClick={() => sendModeUpdate('voice')}
             >
               Voice Mode
             </button>
             <button
               className={`px-5 py-2 rounded-md text-sm font-bold transition-all shadow-sm ${mode === 'text' ? 'bg-white text-blue-700 ring-1 ring-gray-200' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-200/50'}`}
-              onClick={() => setMode('text')}
+              onClick={() => sendModeUpdate('text')}
             >
               Text Only
             </button>

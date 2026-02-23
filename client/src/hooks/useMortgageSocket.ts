@@ -187,6 +187,8 @@ export function useMortgageSocket(url: string) {
     const [thinkingState, setThinkingState] = useState<string | null>(null);
     const [volume, setVolume] = useState(0);
     const [partialTranscript, setPartialTranscript] = useState('');
+    const [mode, setModeState] = useState<'text' | 'voice'>('text');
+    const modeRef = useRef<'text' | 'voice'>('text');
 
 
     const [ttfb, setTtfb] = useState<number | null>(null);
@@ -251,8 +253,15 @@ export function useMortgageSocket(url: string) {
         ws.onopen = () => {
             setConnected(true);
             ws.send(JSON.stringify({ type: 'client.hello', sessionId: clientSessionIdRef.current }));
+            // Also inform the server of the current UI mode (voice/text)
+            ws.send(JSON.stringify({
+                type: 'client.mode.update',
+                sessionId: clientSessionIdRef.current,
+                payload: { mode: modeRef.current }
+            }));
             setSocket(ws);
         };
+
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
@@ -314,6 +323,11 @@ export function useMortgageSocket(url: string) {
                     // AudioBufferSourceNode.onended before closing the context.
                     oldStreamer.finishPlayback(() => {
                         setVoicePlaying(false);
+                        // Auto-restart listening if in voice mode and the server isn't thinking
+                        if (modeRef.current === 'voice' && connected) {
+                            console.log('[Auto-Restart] Voice playback finished, re-enabling mic');
+                            sendAudioStart().catch(err => console.error('[Auto-Restart] Failed:', err));
+                        }
                     });
                 }
             } else if (type === 'server.a2ui.patch') {
@@ -529,6 +543,8 @@ registerProcessor('pcm16-processor', PCM16Processor);
     };
 
     const sendModeUpdate = useCallback((newMode: 'text' | 'voice') => {
+        setModeState(newMode);
+        modeRef.current = newMode;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         console.log('[Hook] Sending mode update:', newMode);
         socket.send(JSON.stringify({
@@ -554,6 +570,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
         disconnect,
         volume,
         isRecording,
+        mode,
         latency: { ttfb, uiPatchLatency, voiceLatency }
     };
 

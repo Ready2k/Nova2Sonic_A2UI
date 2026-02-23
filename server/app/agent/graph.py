@@ -178,16 +178,17 @@ def render_missing_inputs(state: AgentState):
                 llm = ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION", "us-east-1"))
                 
                 system_prompt = (
-                    "You are a sophisticated Barclays Mortgage Specialist. You provide world-class, "
-                    "supportive, and empathetic service. \n\n"
+                    "You are a professional Barclays Mortgage Assistant. Your goal is to collect "
+                    "required information efficiently while remaining polite and helpful. \n\n"
                     "Your personality:\n"
-                    "- Warm, professional, and reassuring (like an expert human advisor).\n"
-                    "- Acknowledge the user's specific context (e.g., excitement, relocation, or savings goals).\n"
-                    "- IMPORTANT: Use the personal details in the 'NOTES' below to make the conversation feel human and memorable.\n"
-                    "- Explain the 'why' behind questions occasionally to add professional depth.\n"
+                    "- Direct, professional, and helpful.\n"
+                    "- Acknowledge the user's input with specific context, but don't be overly emotional.\n"
+                    "- IMPORTANT: Avoid starting your response with filler words like 'Noted', 'Understood', or 'Okay'.\n"
                     f"Current Product Flow: {category}\n"
-                    "Goal: Collect one specific detail while maintaining a premium conversational flow."
+                    "Goal: Collect the specific detail requested."
                 )
+
+
                 
                 messages = state.get("messages", [])
                 notes = intent.get("notes", "No personal context shared yet.")
@@ -197,11 +198,12 @@ def render_missing_inputs(state: AgentState):
                     f"USER JUST SAID: '{state.get('transcript')}'\n"
                     f"FIELD NEEDED: {target_field}\n\n"
                     "INSTRUCTIONS:\n"
-                    "1. If the user asked a question (e.g. 'what does that mean?'), explain it first (e.g. 'Loan balance is the amount you want to borrow').\n"
-                    "2. Acknowledge what the user just shared with specifically tailored empathy.\n"
-                    "3. If 'NOTES ON USER' has details, subtly reference them to show you are listening.\n"
-                    "4. Ask for the 'field needed' elegantly.\n"
-                    "5. Keep it to 2-3 sentences max."
+                    "1. Provide a brief, clear answer to any technical questions.\n"
+                    "2. Acknowledge what the user just said by incorporating it into your next question or a brief statement (e.g., 'To help with your [context], I need to know...').\n"
+                    "3. Ask for the 'field needed' clearly and directly.\n"
+                    "4. Keep the total response to 2-3 sentences."
+
+
                 )
 
                 response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
@@ -439,10 +441,12 @@ def render_products_a2ui(state: AgentState):
             llm = ChatBedrockConverse(model=model_id, region_name=os.getenv("AWS_REGION", "us-east-1"))
             
             system_prompt = (
-                "You are a helpful Barclays Mortgage Assistant. The user has provided all their details, "
-                "and you have found some mortgage products for them. Acknowledge their effort and "
-                "introduce the products shown on screen. Be brief (1-2 sentences)."
+                "You are a professional Barclays Mortgage Assistant. The user has provided their details, "
+                "and you have found mortgage products for them. Briefly introduce the options shown "
+                "on screen in 1-2 sentences."
             )
+
+
             
             user_msg = f"User Intent: {state.get('intent')}\n"
             user_msg += f"Calculated LTV: {ltv}%\n"
@@ -574,7 +578,8 @@ def render_summary_a2ui(state: AgentState):
     }
     new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
     
-    msg = "Great choice. I've prepared your summary. You can review it on screen and confirm if you want to proceed."
+    msg = "I've prepared your summary. You can review it on screen and confirm if you want to proceed."
+
     new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
     new_messages.append({"role": "assistant", "text": msg})
     
@@ -600,7 +605,9 @@ def confirm_application(state: AgentState):
         }
     }
     new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
-    msg = "Fantastic, your application has been started successfully."
+    msg = "Thank you. Your application has been started successfully, and a specialist will be in touch to discuss the next steps."
+
+
     new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
     new_messages.append({"role": "assistant", "text": msg})
     
