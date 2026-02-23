@@ -1,0 +1,64 @@
+# NOTE: session state is held in-process (Python dict).
+# Keep replicas: 1 for this demo.  To scale horizontally, externalise session
+# state to Redis and enable ALB sticky sessions on the ingress.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server
+  namespace: barclays-mortgage
+  labels:
+    app: server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: server
+  template:
+    metadata:
+      labels:
+        app: server
+    spec:
+      serviceAccountName: server-sa   # binds the Bedrock IRSA role
+
+      containers:
+        - name: server
+          image: "${SERVER_IMAGE}"    # substituted by deploy script
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+
+          env:
+            - name: ASSETS_DIR
+              value: /assets
+            - name: AWS_REGION
+              value: us-east-1
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # AGENT_MODEL_ID can be overridden here if needed:
+            # - name: AGENT_MODEL_ID
+            #   value: amazon.nova-lite-v1:0
+
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"

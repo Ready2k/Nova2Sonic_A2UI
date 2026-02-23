@@ -1,0 +1,10 @@
+# IngressClass resource required by AWS Load Balancer Controller v2.x.
+# Applied once during cluster bootstrap (scripts/01-deploy-infra.sh).
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+spec:
+  controller: ingress.k8s.aws/alb

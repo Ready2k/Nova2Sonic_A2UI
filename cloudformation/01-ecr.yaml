@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ECR repositories for the Barclays Mortgage Assistant.
+  Deploy this stack first — outputs are consumed by the build scripts.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: barclays-mortgage
+    Description: Prefix applied to all resource names.
+
+Resources:
+
+  ServerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${NamePrefix}-server"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Retain the 10 most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  ClientRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${NamePrefix}-client"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Retain the 10 most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+Outputs:
+
+  ServerRepositoryUri:
+    Description: Full URI of the server ECR repository
+    Value: !GetAtt ServerRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-ServerRepositoryUri"
+
+  ClientRepositoryUri:
+    Description: Full URI of the client ECR repository
+    Value: !GetAtt ClientRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-ClientRepositoryUri"
+
+  AwsAccountId:
+    Description: AWS account ID (used to construct docker login commands)
+    Value: !Ref AWS::AccountId
+
+  AwsRegion:
+    Description: AWS region
+    Value: !Ref AWS::Region

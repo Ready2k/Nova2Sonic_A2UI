@@ -1,5 +1,6 @@
 import os
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional, TypedDict, Annotated
 import operator
 from langgraph.graph import StateGraph, START, END
@@ -8,6 +9,10 @@ from .tools import calculate_ltv, fetch_mortgage_products, recalculate_monthly_p
 from geopy.geocoders import Nominatim
 
 logger = logging.getLogger(__name__)
+
+# Asset directory: override with ASSETS_DIR env var (set in Docker to /assets).
+# Falls back to the repository root resolved relative to this file's location.
+_ASSETS_DIR = os.getenv("ASSETS_DIR", str(Path(__file__).resolve().parents[3]))
 
 def append_reducer(a: list, b: list) -> list:
     return a + b
@@ -273,10 +278,10 @@ def render_missing_inputs(state: AgentState):
     
     if not category:
         try:
-            with open("/Users/jamescregeen/A2UI_S2S/ftb_b64.txt", "r") as f: ftb_icon = f.read().strip()
-            with open("/Users/jamescregeen/A2UI_S2S/remortgage_b64.txt", "r") as f: remortgage_icon = f.read().strip()
-            with open("/Users/jamescregeen/A2UI_S2S/btl_b64.txt", "r") as f: btl_icon = f.read().strip()
-            with open("/Users/jamescregeen/A2UI_S2S/moving_b64.txt", "r") as f: moving_icon = f.read().strip()
+            with open(os.path.join(_ASSETS_DIR, "ftb_b64.txt"), "r") as f: ftb_icon = f.read().strip()
+            with open(os.path.join(_ASSETS_DIR, "remortgage_b64.txt"), "r") as f: remortgage_icon = f.read().strip()
+            with open(os.path.join(_ASSETS_DIR, "btl_b64.txt"), "r") as f: btl_icon = f.read().strip()
+            with open(os.path.join(_ASSETS_DIR, "moving_b64.txt"), "r") as f: moving_icon = f.read().strip()
         except:
             ftb_icon = remortgage_icon = btl_icon = moving_icon = ""
 

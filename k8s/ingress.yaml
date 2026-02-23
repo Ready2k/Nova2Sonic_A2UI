@@ -1,0 +1,59 @@
+# AWS Application Load Balancer ingress managed by the AWS Load Balancer Controller.
+#
+# Routing (path-based, evaluated top-to-bottom):
+#   /ws   → server:8000   (WebSocket upgrade, 300-second idle timeout)
+#   /     → client:3000   (Next.js SPA, catches all remaining paths)
+#
+# The ALB DNS name is used as NEXT_PUBLIC_WS_URL when building the client image.
+# Run: kubectl get ingress -n barclays-mortgage  to retrieve it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mortgage-ingress
+  namespace: barclays-mortgage
+  annotations:
+    # Use the AWS ALB ingress controller
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # Listen on HTTP (port 80).
+    # To add HTTPS, add a certificate ARN annotation and include port 443:
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+
+    # Extend idle timeout so long-running WebSocket sessions are not dropped.
+    alb.ingress.kubernetes.io/load-balancer-attributes: >-
+      idle_timeout.timeout_seconds=300
+
+    # Target group health-check settings
+    alb.ingress.kubernetes.io/healthcheck-path: /docs
+    alb.ingress.kubernetes.io/healthcheck-port: "8000"
+    alb.ingress.kubernetes.io/success-codes: "200"
+
+    # Uncomment to enable sticky sessions (required if server replicas > 1):
+    # alb.ingress.kubernetes.io/target-group-attributes: >-
+    #   stickiness.enabled=true,stickiness.lb_cookie.duration_seconds=86400
+
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # WebSocket endpoint — must be listed before the catch-all
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: server
+                port:
+                  number: 8000
+
+          # Everything else goes to the Next.js client
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: client
+                port:
+                  number: 3000

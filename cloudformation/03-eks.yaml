@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  EKS cluster, managed node group, OIDC provider, and IAM roles for the
+  Barclays Mortgage Assistant. Includes IRSA roles for the server pods
+  (Bedrock access) and the AWS Load Balancer Controller.
+
+Parameters:
+
+  ClusterName:
+    Type: String
+    Default: barclays-mortgage
+
+  KubernetesVersion:
+    Type: String
+    Default: "1.31"
+    AllowedValues: ["1.29", "1.30", "1.31"]
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC in which to create the cluster (from 02-vpc stack output)
+
+  PrivateSubnets:
+    Type: String
+    Description: Comma-delimited private subnet IDs for worker nodes
+
+  PublicSubnets:
+    Type: String
+    Description: Comma-delimited public subnet IDs for the ALB
+
+  NodeInstanceType:
+    Type: String
+    Default: t3.medium
+    Description: EC2 instance type for worker nodes
+
+  NodeDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+
+  NodeMinCount:
+    Type: Number
+    Default: 1
+
+  NodeMaxCount:
+    Type: Number
+    Default: 4
+
+  # OIDC thumbprint for the EKS OIDC provider.
+  # Compute with: scripts/01-deploy-infra.sh (done automatically).
+  # Default is the well-known thumbprint for EKS in us-east-1.
+  OIDCThumbprint:
+    Type: String
+    Default: "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"
+
+  AppNamespace:
+    Type: String
+    Default: barclays-mortgage
+    Description: Kubernetes namespace where the application pods run
+
+  ServerServiceAccount:
+    Type: String
+    Default: server-sa
+    Description: Kubernetes service account used by the server pods
+
+Resources:
+
+  # ── EKS control-plane IAM role ────────────────────────────────────────────
+  ClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-cluster-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  # ── EKS worker-node IAM role ──────────────────────────────────────────────
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-node-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  # ── EKS Cluster ───────────────────────────────────────────────────────────
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt ClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds: !Split [",", !Join [",", [!Ref PrivateSubnets, !Ref PublicSubnets]]]
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+
+  # ── Managed node group ────────────────────────────────────────────────────
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub "${ClusterName}-workers"
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets: !Split [",", !Ref PrivateSubnets]
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      ScalingConfig:
+        DesiredSize: !Ref NodeDesiredCount
+        MinSize: !Ref NodeMinCount
+        MaxSize: !Ref NodeMaxCount
+      AmiType: AL2_x86_64
+      DiskSize: 50
+      Labels:
+        role: worker
+      Tags:
+        Name: !Sub "${ClusterName}-worker"
+
+  # ── OIDC identity provider (enables IRSA) ────────────────────────────────
+  OIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    DependsOn: EKSCluster
+    Properties:
+      Url: !GetAtt EKSCluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - !Ref OIDCThumbprint
+
+  # ── IRSA role: server pods → Amazon Bedrock ───────────────────────────────
+  # Allows server pods (identified by their Kubernetes service account) to call
+  # Amazon Bedrock (Nova Lite NLU) and Amazon Nova 2 Sonic (STT/TTS) without
+  # long-lived credentials baked into the container.
+  BedrockRole:
+    Type: AWS::IAM::Role
+    DependsOn: OIDCProvider
+    Properties:
+      RoleName: !Sub "${ClusterName}-bedrock-role"
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "arn:aws:iam::${AWS::AccountId}:oidc-provider/${OIDCHost}"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${OIDCHost}:sub": "system:serviceaccount:${AppNamespace}:${ServerServiceAccount}",
+                      "${OIDCHost}:aud": "sts.amazonaws.com"
+                    }
+                  }
+                }
+              ]
+            }
+          - OIDCHost: !Select [1, !Split ["https://", !GetAtt EKSCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-lite-v1:0"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-2-sonic-v1:0"
+
+  # ── IRSA role: AWS Load Balancer Controller ───────────────────────────────
+  # The controller's heavy IAM policy is downloaded and attached by
+  # scripts/01-deploy-infra.sh; only the trust relationship is defined here.
+  ALBControllerRole:
+    Type: AWS::IAM::Role
+    DependsOn: OIDCProvider
+    Properties:
+      RoleName: !Sub "${ClusterName}-alb-controller-role"
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "arn:aws:iam::${AWS::AccountId}:oidc-provider/${OIDCHost}"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${OIDCHost}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                      "${OIDCHost}:aud": "sts.amazonaws.com"
+                    }
+                  }
+                }
+              ]
+            }
+          - OIDCHost: !Select [1, !Split ["https://", !GetAtt EKSCluster.OpenIdConnectIssuerUrl]]
+
+Outputs:
+
+  ClusterName:
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterName"
+
+  ClusterEndpoint:
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterEndpoint"
+
+  OIDCIssuerUrl:
+    Value: !GetAtt EKSCluster.OpenIdConnectIssuerUrl
+    Export:
+      Name: !Sub "${AWS::StackName}-OIDCIssuerUrl"
+
+  OIDCProviderArn:
+    Value: !Ref OIDCProvider
+    Export:
+      Name: !Sub "${AWS::StackName}-OIDCProviderArn"
+
+  NodeRoleArn:
+    Value: !GetAtt NodeRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-NodeRoleArn"
+
+  BedrockRoleArn:
+    Value: !GetAtt BedrockRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BedrockRoleArn"
+
+  ALBControllerRoleArn:
+    Value: !GetAtt ALBControllerRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBControllerRoleArn"

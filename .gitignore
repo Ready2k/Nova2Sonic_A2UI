@@ -232,3 +232,6 @@ server/*.pid
 .env
 .env.*
 !.env.example
+
+# --- Docker / deploy artefacts ---
+.image-env
