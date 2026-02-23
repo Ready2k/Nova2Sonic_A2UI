@@ -360,9 +360,11 @@ async function main() {
             }
 
             if (eventData.promptEnd) {
-                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Total emitted chunks=${chunksEmittedTotal}`);
+                // Prompt end can arrive before all buffered audioOutput events are drained.
+                // Do not break early; keep consuming the stream until it naturally ends.
+                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Continuing to drain stream. Total emitted chunks=${chunksEmittedTotal}`);
                 finishSignal();
-                break;
+                continue;
             }
 
             if (eventData.internalServerException) {
@@ -382,7 +384,7 @@ async function main() {
         }
 
         if (!canFinish) {
-            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${audioChunkCount}`);
+            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${chunksEmittedTotal}`);
             finishSignal();
         }
     } catch (e) {
