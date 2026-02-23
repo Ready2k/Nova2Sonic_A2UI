@@ -133,13 +133,13 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
         switch (component.component) {
             case 'Column':
                 return (
-                    <div key={id} className="flex flex-col gap-6 w-full animate-in fade-in slide-in-from-bottom-4 duration-700">
+                    <div key={id} data-a2-id={id} className="flex flex-col gap-6 w-full animate-in fade-in slide-in-from-bottom-4 duration-700">
                         {children}
                     </div>
                 );
             case 'Row':
                 return (
-                    <div key={id} className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
+                    <div key={id} data-a2-id={id} className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
                         {children}
                     </div>
                 );
@@ -158,7 +158,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                             ? 'text-gray-900'
                             : 'text-gray-600';
                 return (
-                    <p key={id} className={`${baseVariant} ${focusClasses} transition-colors duration-300`}>
+                    <p key={id} data-a2-id={id} data-a2-focused={component.focus} className={`${baseVariant} ${focusClasses} transition-colors duration-300`}>
                         {component.text}
                     </p>
                 );
@@ -166,7 +166,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
             case 'Gauge': {
                 const ltv = component.value || 0;
                 return (
-                    <div key={id} className="p-8 bg-white rounded-3xl shadow-[0_20px_50px_rgba(8,_112,_184,_0.1)] border border-blue-50 flex flex-col items-center">
+                    <div key={id} data-a2-id={id} data-a2-focused={component.focus} className="p-8 bg-white rounded-3xl shadow-[0_20px_50px_rgba(8,_112,_184,_0.1)] border border-blue-50 flex flex-col items-center">
                         <div className="relative w-56 h-28 overflow-hidden">
                             <div className="absolute top-0 left-0 w-56 h-56 border-[20px] border-slate-50 rounded-full"></div>
                             <div
@@ -200,6 +200,8 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 return (
                     <div
                         key={id}
+                        data-a2-id={id}
+                        data-a2-focused={component.focus}
                         className="border-2 border-transparent bg-white shadow-xl p-8 rounded-3xl hover:border-blue-500 hover:shadow-2xl cursor-pointer transition-all flex flex-col justify-between group relative overflow-hidden active:scale-[0.98]"
                         onClick={() => onAction('select_product', { productId: p.id })}
                     >
@@ -239,6 +241,8 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 return (
                     <button
                         key={id}
+                        data-a2-id={id}
+                        data-a2-focused={component.focus}
                         className="w-full bg-blue-600 text-white px-6 py-4 rounded-2xl font-black uppercase tracking-widest text-sm hover:bg-blue-700 transition-all shadow-lg active:scale-[0.98] mt-4"
                         onClick={() => {
                             if (component.data?.url) {
@@ -296,7 +300,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 `;
 
                 return (
-                    <div key={id} className="w-full h-72 rounded-3xl overflow-hidden shadow-xl border-4 border-white mb-6 animate-in zoom-in-95 duration-700">
+                    <div key={id} data-a2-id={id} data-a2-focused={component.focus} className="w-full h-72 rounded-3xl overflow-hidden shadow-xl border-4 border-white mb-6 animate-in zoom-in-95 duration-700">
                         <iframe
                             width="100%"
                             height="100%"
@@ -312,7 +316,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 const steps = (component.data?.steps as string[]) || [];
                 const current = (component.data?.current as number) || 0;
                 return (
-                    <div key={id} className="w-full flex justify-between items-center mb-10 px-4 relative">
+                    <div key={id} data-a2-id={id} className="w-full flex justify-between items-center mb-10 px-4 relative">
                         <div className="absolute top-1/2 left-0 w-full h-0.5 bg-slate-100 -z-10 -translate-y-1/2"></div>
                         {steps.map((step, i) => (
                             <div key={i} className="flex flex-col items-center gap-2">
@@ -339,7 +343,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                     return '📋';
                 };
                 return (
-                    <div key={id} className="grid grid-cols-2 gap-4 mb-6">
+                    <div key={id} data-a2-id={id} data-a2-focused={component.focus} className="grid grid-cols-2 gap-4 mb-6">
                         {items.map((item, i) => (
                             <div key={i} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-50 flex items-center gap-3 group hover:border-blue-100 transition-colors">
                                 <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-blue-600 group-hover:bg-blue-50 transition-colors">
@@ -366,7 +370,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         : { bg: 'from-green-50 to-emerald-50', border: 'border-green-100', icon: 'bg-green-500 shadow-green-200/50', emoji: '🌿', label: 'text-green-700', body: 'text-green-800/70' };
 
                 return (
-                    <div key={id} className={`w-full bg-gradient-to-br ${theme.bg} p-6 rounded-3xl border ${theme.border} mb-6 flex items-center gap-5 animate-in slide-in-from-right-8 duration-1000`}>
+                    <div key={id} data-a2-id={id} data-a2-focused={component.focus} className={`w-full bg-gradient-to-br ${theme.bg} p-6 rounded-3xl border ${theme.border} mb-6 flex items-center gap-5 animate-in slide-in-from-right-8 duration-1000`}>
                         <div className={`w-14 h-14 ${theme.icon} rounded-2xl flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
                             {theme.emoji}
                         </div>
@@ -380,7 +384,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
             }
             case 'ComparisonBadge': {
                 return (
-                    <div key={id} className="inline-flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100 mb-2">
+                    <div key={id} data-a2-id={id} className="inline-flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-100 mb-2">
                         <span className="text-blue-600 text-xs">📈</span>
                         <span className="text-[10px] font-bold text-blue-800 uppercase tracking-tight">{component.text}</span>
                     </div>
@@ -411,7 +415,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 const label = d.label || component.text || '';
                 const trendColor = d.trendUp === false ? 'text-red-500' : 'text-green-600';
                 return (
-                    <div key={id} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col items-center text-center animate-in zoom-in-95 duration-500">
+                    <div key={id} data-a2-id={id} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col items-center text-center animate-in zoom-in-95 duration-500">
                         <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">{label}</p>
                         <p className="text-5xl font-black text-blue-950 leading-none tabular-nums">{d.value ?? '—'}</p>
                         {d.sub && <p className="text-xs text-slate-400 mt-3 font-semibold">{d.sub}</p>}
@@ -433,7 +437,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 const borderColor = isHigh ? 'border-red-100' : isMid ? 'border-amber-100' : 'border-green-100';
                 const bgColor = isHigh ? 'bg-red-50' : isMid ? 'bg-amber-50' : 'bg-green-50';
                 return (
-                    <div key={id} className={`p-5 rounded-2xl border ${borderColor} ${bgColor} animate-in fade-in duration-700`}>
+                    <div key={id} data-a2-id={id} data-a2-focused={component.focus} className={`p-5 rounded-2xl border ${borderColor} ${bgColor} animate-in fade-in duration-700`}>
                         <div className="flex justify-between items-center mb-3">
                             <span className="text-xs font-bold text-gray-700">{label}</span>
                             <span className={`text-sm font-black ${textColor}`}>{pct}%</span>
@@ -455,7 +459,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
             case 'Checklist': {
                 const items = (component.data?.items as { label: string; checked?: boolean; note?: string }[]) || [];
                 return (
-                    <div key={id} className="bg-white rounded-3xl border border-slate-100 p-6 shadow-sm animate-in fade-in duration-700">
+                    <div key={id} data-a2-id={id} data-a2-focused={component.focus} className="bg-white rounded-3xl border border-slate-100 p-6 shadow-sm animate-in fade-in duration-700">
                         <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-5">{component.text || 'Checklist'}</h4>
                         <div className="flex flex-col gap-3">
                             {items.map((item, i) => (

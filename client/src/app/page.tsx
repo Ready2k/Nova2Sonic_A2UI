@@ -33,6 +33,55 @@ export default function Home() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
+  const [chatY, setChatY] = useState(0);
+
+  useEffect(() => {
+    // Follow focus logic: find the element being highlighted in the right panel
+    // and slide the chat box to be vertically aligned with it.
+    const updateChatPosition = () => {
+      const focusedEl = document.querySelector('[data-a2-focused="true"]');
+      const panel = rightPanelRef.current;
+      if (focusedEl && panel) {
+        const focusedRect = focusedEl.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+
+        // Match the element's top position in the viewport, 
+        // offset by a small bit to look balanced.
+        const chatHeight = 400; // Expected max height
+        let targetY = focusedRect.top - panelRect.top;
+
+        // Constrain to panel visible area 
+        const maxScroll = panelRect.height - chatHeight - 40;
+        targetY = Math.max(20, Math.min(maxScroll, targetY));
+
+        setChatY(targetY);
+      } else {
+        setChatY(0);
+      }
+    };
+
+    // Use ResizeObserver to detect when the content on the right changes height
+    const panel = rightPanelRef.current;
+    if (!panel) return;
+
+    const observer = new ResizeObserver(updateChatPosition);
+    observer.observe(panel);
+
+    // Also update on scroll and manual window resize
+    panel.addEventListener('scroll', updateChatPosition);
+    window.addEventListener('resize', updateChatPosition);
+
+    // Initial positioning
+    const timer = setTimeout(updateChatPosition, 100);
+
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+      panel.removeEventListener('scroll', updateChatPosition);
+      window.removeEventListener('resize', updateChatPosition);
+    };
+  }, [a2uiState, messages]);
 
   useEffect(() => {
     // Scroll to bottom of message log when new message is added
@@ -119,10 +168,11 @@ export default function Home() {
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
         {/* Left Panel - Chat / Controls */}
-        <div className="w-[35%] min-w-[340px] max-w-lg bg-white border-r border-gray-200 flex flex-col p-6 shadow-xl z-[5]">
-
-          <div className="flex-1 flex flex-col justify-center gap-6">
-
+        <div className="w-[35%] min-w-[340px] max-w-lg bg-white border-r border-gray-200 p-6 shadow-xl z-[5] overflow-y-auto no-scrollbar relative">
+          <div
+            className="flex flex-col gap-6 transition-all duration-700 ease-in-out absolute left-6 right-6"
+            style={{ top: `${chatY + 24}px` }}
+          >
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col relative overflow-hidden group hover:border-blue-200 transition-colors h-[400px]">
               {/* Decorative blur */}
               <div className="absolute top-0 w-full h-1 bg-gradient-to-r from-blue-400 to-indigo-500 left-0"></div>
@@ -262,7 +312,7 @@ export default function Home() {
         </div>
 
         {/* Right Panel - A2UI Canvas */}
-        <div className="flex-1 overflow-y-auto bg-slate-100/50 flex flex-col">
+        <div ref={rightPanelRef} className="flex-1 overflow-y-auto bg-slate-100/50 flex flex-col scroll-smooth">
           <div className="p-8 max-w-4xl mx-auto w-full flex-1 flex flex-col relative">
             {/* Decorative background circle */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-blue-50/50 rounded-full blur-3xl pointer-events-none -z-10"></div>

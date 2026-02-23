@@ -226,17 +226,19 @@ class AgentState(TypedDict):
 # ─── Intent model ─────────────────────────────────────────────────────────────
 
 class MortgageIntent(BaseModel):
+    category: Optional[str] = Field(description="The type of mortgage: 'First-time buyer', 'Remortgage', 'Buy-to-let', or 'Moving home'", default=None)
     propertyValue: Optional[int] = Field(description="The value of the property in GBP", default=None)
-    loanBalance: Optional[int] = Field(description="The remaining mortgageloan balance in GBP", default=None)
+    loanBalance: Optional[int] = Field(description="The requested mortgage amount (for purchases) or existing loan balance (for remortgages) in GBP", default=None)
     fixYears: Optional[int] = Field(description="The requested fixed rate term in years, e.g. 2, 5, 10", default=None)
     termYears: Optional[int] = Field(description="The overall mortgage repayment term in years, default is 25", default=25)
     existingCustomer: Optional[bool] = Field(description="Whether the user already banks with Barclays", default=None)
     propertySeen: Optional[bool] = Field(description="Whether the user has already found a property they want to buy", default=None)
+    isJoint: Optional[bool] = Field(description="Whether this is a joint mortgage application", default=None)
     address: Optional[str] = Field(description="The address of the property", default=None)
     lat: Optional[float] = Field(description="Latitude of the property", default=None)
     lng: Optional[float] = Field(description="Longitude of the property", default=None)
     notes: Optional[str] = Field(description="Any personal life context or feelings the user shared (e.g. 'excited about first home', 'nervous about rates')", default=None)
-    annualIncome: Optional[int] = Field(description="The user's annual gross income in GBP (e.g. '40k' = 40000, '40,000 a year' = 40000)", default=None)
+    annualIncome: Optional[int] = Field(description="The total annual gross income for the application (summed for joint applications) in GBP", default=None)
     processQuestion: Optional[str] = Field(description="If the user is asking a question about the mortgage process (documents needed, timeline, what AiP means, fees, next steps, LTV, solicitors, overpayments, etc.), capture the question verbatim here. Leave null if they are just providing data.", default=None)
 
 
@@ -263,13 +265,13 @@ def interpret_intent(state: AgentState):
         last_question_context = "The last question asked was: 'Do you already bank with Barclays?' — so 'yes'/'yes it is'/'yeah' means existingCustomer=true, 'no'/'nope' means existingCustomer=false."
     elif intent.get("propertySeen") is None:
         last_question_context = "The last question asked was: 'Have you found a property yet?' — so 'yes'/'yeah'/'found one' means propertySeen=true, 'no'/'not yet' means propertySeen=false."
-    elif not intent.get("propertyValue"):
+    elif intent.get("propertyValue") is None:
         last_question_context = "The last question asked was about property value. Extract the number from the answer."
-    elif not intent.get("annualIncome"):
-        last_question_context = "The last question asked was about annual gross income (yearly salary). Extract the number (e.g. '40k' = 40000, '40,000 a year' = 40000, '£55,000' = 55000)."
-    elif not intent.get("loanBalance"):
-        last_question_context = "The last question asked was about loan amount. Extract the number from the answer."
-    elif not intent.get("fixYears"):
+    elif intent.get("annualIncome") is None:
+        last_question_context = "The last question asked was about annual gross income (yearly salary). Extract and SUM the incomes if multiple are provided (e.g. 'mine is 40k and my wife's is 28k' -> 68000)."
+    elif intent.get("loanBalance") is None:
+        last_question_context = "The last question asked was about the mortgage amount or loan balance. Extract the number from the answer."
+    elif intent.get("fixYears") is None:
         last_question_context = "The last question asked was about fixed term years (2, 3, 5, or 10). Extract the number."
 
     if os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_PROFILE"):
@@ -297,7 +299,8 @@ def interpret_intent(state: AgentState):
                 "Rules:\n"
                 "- Interpret short answers (yes/no/yeah/nope) using the context above.\n"
                 "- For money amounts, extract the number (e.g. '400k' = 400000, '400 thousand' = 400000).\n"
-                "- For annual income, extract the yearly gross salary figure.\n"
+                "- For annual income, extract the yearly gross salary figure. If it's a joint application, please SUM both incomes into a single field.\n"
+                "- If the user mentions they are applying with a partner, set 'isJoint' to true.\n"
                 "- If the user shares life details (new baby, relocation, retirement), capture a brief summary in the 'notes' field.\n"
                 "- Do NOT change fields that already have values unless the user explicitly corrects them.\n"
                 "- If the user is just being conversational ('okay', 'go for it'), do NOT change any fields.\n"
@@ -419,6 +422,16 @@ def interpret_intent(state: AgentState):
         struggle_keywords = ["struggling", "help", "don't know", "dont know", "not working", "stuck", "human", "specialist", "agent", "person"]
         is_struggling = any(kw in transcript.lower() for kw in struggle_keywords)
 
+        # ── Address correction detection ──────────────────────────────────────
+        wrong_address_keywords = ["wrong address", "not that address", "incorrect address", "wrong place", "not that one", "not on the map", "wrong on the map"]
+        if any(kw in transcript.lower() for kw in wrong_address_keywords) and intent.get("address"):
+            logger.info("User indicated the address is wrong. Clearing address fields.")
+            new_intent.pop("address", None)
+            new_intent.pop("lat", None)
+            new_intent.pop("lng", None)
+            address_validation_failed = True
+            last_attempted_address = None # Reset so we ask fresh
+
         # Asking a process question counts as engagement — don't penalise
         if intent_changed or process_question:
             new_trouble_count = max(0, new_trouble_count - 1) if process_question and not intent_changed else 0
@@ -458,13 +471,13 @@ def render_missing_inputs(state: AgentState):
     elif category == "Remortgage":
         if not intent.get("address"):
             missing.append("address")
-        elif not intent.get("propertyValue"):
+        elif intent.get("propertyValue") is None:
             missing.append("property value")
-        elif not intent.get("annualIncome"):
+        elif intent.get("annualIncome") is None:
             missing.append("annual income")
-        elif not intent.get("loanBalance"):
+        elif intent.get("loanBalance") is None:
             missing.append("loan balance")
-        elif not intent.get("fixYears"):
+        elif intent.get("fixYears") is None:
             missing.append("fixed term (years)")
 
     # Purchase-style flows (FTB, Moving Home, BTL)
@@ -473,13 +486,13 @@ def render_missing_inputs(state: AgentState):
             missing.append("if you have already found a property")
         elif intent.get("propertySeen") and not intent.get("address"):
             missing.append("address")
-        elif not intent.get("propertyValue"):
+        elif intent.get("propertyValue") is None:
             missing.append("property value")
-        elif not intent.get("annualIncome"):
+        elif intent.get("annualIncome") is None:
             missing.append("annual income")
-        elif not intent.get("loanBalance"):
-            missing.append("loan balance")
-        elif not intent.get("fixYears"):
+        elif intent.get("loanBalance") is None:
+            missing.append("mortgage amount")
+        elif intent.get("fixYears") is None:
             missing.append("fixed term (years)")
 
     new_outbox = []
@@ -495,7 +508,8 @@ def render_missing_inputs(state: AgentState):
         new_outbox.append({"type": "server.voice.say", "payload": {"text": faq_answer_text}})
         new_messages.append({"role": "assistant", "text": faq_answer_text})
 
-    category = state.get("intent", {}).get("category", "a mortgage")
+    category_val = state.get("intent", {}).get("category")
+    category_label = category_val if category_val else "a mortgage"
     just_selected = state.get("pendingAction", {}) and state.get("pendingAction", {}).get("data", {}).get("action") == "select_category"
 
     if missing:
@@ -528,8 +542,9 @@ def render_missing_inputs(state: AgentState):
                     "Your personality:\n"
                     "- Direct, professional, and helpful.\n"
                     "- Acknowledge the user's input with specific context, but don't be overly emotional.\n"
-                    "- IMPORTANT: Avoid starting your response with filler words like 'Noted', 'Understood', or 'Okay'.\n"
-                    f"Current Product Flow: {category}\n"
+                    "- IMPORTANT: If the user is protesting that something is incorrect (e.g., 'that's the wrong address', 'that's not right'), PRIORITIZE addressing their concern and asking for the correct value over moving to the next field.\n"
+                    "- Terminology: For First-Time Buyers or home movers, avoid the term 'loan balance' — use 'mortgage amount' or 'amount you wish to borrow' instead.\n"
+                    f"Current Product Flow: {category_label}\n"
                     "Goal: Collect the specific detail requested."
                 )
 
@@ -540,10 +555,11 @@ def render_missing_inputs(state: AgentState):
                     f"HISTORY: {messages[-4:]}\n"
                     f"USER JUST SAID: '{state.get('transcript')}'\n"
                     f"FIELD NEEDED: {target_field}\n"
+                    f"JUST SELECTED CATEGORY: {just_selected} (If true, acknowledge the selection of {category_label} warmly in your opening)\n"
                     f"{address_failure_note}\n\n"
                     "INSTRUCTIONS:\n"
                     "1. Provide a brief, clear answer to any technical questions.\n"
-                    "2. Acknowledge what the user just said by incorporating it into your next question or a brief statement.\n"
+                    "2. Acknowledge what the user just said (or the category they just clicked) by incorporating it into your next question or a brief statement.\n"
                     "3. Ask for the 'field needed' clearly and directly.\n"
                     "4. Keep the total response to 2-3 sentences."
                 )
@@ -690,7 +706,7 @@ def render_missing_inputs(state: AgentState):
     next_missing = missing[0] if missing else None
 
     pv_focus = next_missing in ("property value",)
-    lb_focus = next_missing in ("loan balance",)
+    lb_focus = next_missing in ("loan balance", "mortgage amount")
     fy_focus = next_missing in ("fixed term (years)",)
     addr_focus = next_missing in ("address",)
     income_focus = next_missing in ("annual income",)
@@ -712,11 +728,11 @@ def render_missing_inputs(state: AgentState):
         {"id": "val_pv", "component": "Text", "text": pv_text, "variant": "body", "focus": pv_focus},
 
         {"id": "row_income", "component": "Row", "children": ["lbl_income", "val_income"]},
-        {"id": "lbl_income", "component": "Text", "text": "Annual Income:", "variant": "h3", "focus": income_focus},
+        {"id": "lbl_income", "component": "Text", "text": "Annual Income" + (" (Joint):" if intent.get("isJoint") else ":"), "variant": "h3", "focus": income_focus},
         {"id": "val_income", "component": "Text", "text": income_text, "variant": "body", "focus": income_focus},
 
         {"id": "row_lb", "component": "Row", "children": ["lbl_lb", "val_lb"]},
-        {"id": "lbl_lb", "component": "Text", "text": "Loan Balance:", "variant": "h3", "focus": lb_focus},
+        {"id": "lbl_lb", "component": "Text", "text": "Loan Balance:" if category == "Remortgage" else "Mortgage Amount:", "variant": "h3", "focus": lb_focus},
         {"id": "val_lb", "component": "Text", "text": lb_text, "variant": "body", "focus": lb_focus},
 
         {"id": "row_fy", "component": "Row", "children": ["lbl_fy", "val_fy"]},
@@ -1007,12 +1023,17 @@ def render_products_a2ui(state: AgentState):
             system_prompt = (
                 "You are a professional Barclays Mortgage Assistant. The user has provided their details, "
                 "and you have found mortgage products for them. Briefly introduce the options shown "
-                "on screen in 1-2 sentences."
+                "on screen in 1-2 sentences.\n\n"
+                "RULES:\n"
+                "- If the user's requested fixed term (fixYears) doesn't exactly match the products found, acknowledge this and explain these are the closest matches available.\n"
+                "- Mention the LTV and the key benefit of the top product.\n"
+                "- Stay professional and helpful."
             )
 
             user_msg = f"User Intent: {state.get('intent')}\n"
             user_msg += f"Calculated LTV: {ltv}%\n"
-            user_msg += f"Number of products found: {len(products)}\n"
+            user_msg += f"Requested Fix Years: {state.get('intent', {}).get('fixYears')}\n"
+            user_msg += f"Found Products: {[{'name': p['name'], 'years': p.get('years'), 'rate': p['rate']} for p in products]}\n"
 
             response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
             msg = response.content
