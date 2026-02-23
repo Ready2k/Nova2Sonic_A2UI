@@ -50,7 +50,11 @@ def create_initial_state() -> AgentState:
         "existing_customer": None,
         "property_seen": None,
         "trouble_count": 0,
-        "show_support": False
+        "show_support": False,
+        "address_validation_failed": False,
+        "last_attempted_address": None,
+        "branch_requested": False,
+        "process_question": None,
     }
 
 async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload: dict = None):

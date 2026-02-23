@@ -28,6 +28,85 @@ interface A2RendererProps {
     onAction: (id: string, data?: Record<string, unknown>) => void;
 }
 
+// ── Sub-components with local state ──────────────────────────────────────────
+
+const SliderWidget: React.FC<{ component: A2UIComponent; onAction: (id: string, data?: Record<string, unknown>) => void }> = ({ component, onAction }) => {
+    const d = (component.data || {}) as { min?: number; max?: number; value?: number; step?: number; label?: string; unit?: string };
+    const min = d.min ?? 5;
+    const max = d.max ?? 35;
+    const step = d.step ?? 1;
+    const unit = d.unit ?? '';
+    const label = d.label ?? component.text ?? 'Value';
+    const [current, setCurrent] = React.useState(d.value ?? 25);
+
+    React.useEffect(() => {
+        if (d.value !== undefined) setCurrent(d.value);
+    }, [d.value]);
+
+    return (
+        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 animate-in fade-in duration-500">
+            <div className="flex justify-between items-center mb-5">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</span>
+                <span className="text-3xl font-black text-blue-950 tabular-nums">{current}<span className="text-base text-slate-400 ml-0.5">{unit}</span></span>
+            </div>
+            <div className="relative">
+                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-1">
+                    <div
+                        className="h-full bg-blue-600 rounded-full transition-all duration-150"
+                        style={{ width: `${((current - min) / (max - min)) * 100}%` }}
+                    />
+                </div>
+                <input
+                    type="range"
+                    min={min} max={max} step={step} value={current}
+                    className="absolute inset-0 w-full opacity-0 cursor-pointer h-2"
+                    onChange={(e) => setCurrent(Number(e.target.value))}
+                    onMouseUp={(e) => onAction('update_term', { termYears: Number((e.target as HTMLInputElement).value) })}
+                    onTouchEnd={(e) => onAction('update_term', { termYears: Number((e.target as HTMLInputElement).value) })}
+                />
+            </div>
+            <div className="flex justify-between text-[10px] text-slate-400 mt-2 font-bold uppercase tracking-wider">
+                <span>{min}{unit}</span>
+                <span>{max}{unit}</span>
+            </div>
+        </div>
+    );
+};
+
+const InfoCardWidget: React.FC<{ component: A2UIComponent }> = ({ component }) => {
+    const [expanded, setExpanded] = React.useState(true);
+    const d = (component.data || {}) as { question?: string; answer?: string };
+    const question = d.question || component.text || 'Information';
+    const answer = d.answer || '';
+
+    return (
+        <div className="bg-blue-50 rounded-2xl border border-blue-100 overflow-hidden animate-in slide-in-from-top-4 duration-500">
+            <button
+                className="w-full flex items-center justify-between px-5 py-4 text-left gap-3"
+                onClick={() => setExpanded((v) => !v)}
+            >
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-6 h-6 rounded-full bg-blue-200 text-blue-700 flex items-center justify-center text-[10px] font-black flex-shrink-0">?</div>
+                    <span className="text-sm font-bold text-blue-900 truncate">{question}</span>
+                </div>
+                <svg
+                    className={`w-4 h-4 text-blue-400 flex-shrink-0 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                </svg>
+            </button>
+            {expanded && (
+                <div className="px-5 pb-5 text-sm text-blue-900/80 leading-relaxed border-t border-blue-100/70 pt-4">
+                    {answer}
+                </div>
+            )}
+        </div>
+    );
+};
+
+// ── Main renderer ─────────────────────────────────────────────────────────────
+
 const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
     if (!a2uiState || !a2uiState.updateComponents) {
         return (
@@ -84,7 +163,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                     </p>
                 );
             }
-            case 'Gauge':
+            case 'Gauge': {
                 const ltv = component.value || 0;
                 return (
                     <div key={id} className="p-8 bg-white rounded-3xl shadow-[0_20px_50px_rgba(8,_112,_184,_0.1)] border border-blue-50 flex flex-col items-center">
@@ -115,7 +194,8 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         </div>}
                     </div>
                 );
-            case 'ProductCard':
+            }
+            case 'ProductCard': {
                 const p = (component.data ?? {}) as { id?: string; name?: string; rate?: number; fee?: number; monthlyPayment?: number; totalInterest?: number };
                 return (
                     <div
@@ -123,9 +203,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         className="border-2 border-transparent bg-white shadow-xl p-8 rounded-3xl hover:border-blue-500 hover:shadow-2xl cursor-pointer transition-all flex flex-col justify-between group relative overflow-hidden active:scale-[0.98]"
                         onClick={() => onAction('select_product', { productId: p.id })}
                     >
-                        {/* Background design */}
                         <div className="absolute -right-4 -top-4 w-24 h-24 bg-blue-50/50 rounded-full blur-2xl group-hover:bg-blue-100/50 transition-colors"></div>
-
                         <div className="relative z-10">
                             <div className="flex justify-between items-start">
                                 <h3 className="font-black text-xl text-blue-950 group-hover:text-blue-700 transition-colors leading-tight">{p.name}</h3>
@@ -156,6 +234,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         </div>
                     </div>
                 );
+            }
             case 'Button':
                 return (
                     <button
@@ -205,8 +284,6 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                           }).addTo(map);
                           L.marker([${lat}, ${lng}]).addTo(map)
                             .bindPopup('${address.replace(/'/g, "\\'")}').openPopup();
-                          
-                          // Force a resize check after a small delay to ensure rendering matches container
                           setTimeout(() => { map.invalidateSize(); }, 200);
                         } catch (e) {
                           console.error(e);
@@ -253,12 +330,20 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
             }
             case 'DataCard': {
                 const items = (component.data?.items as { label: string, value: string, icon?: string }[]) || [];
+                const iconFor = (label: string) => {
+                    if (label.toLowerCase().includes('energy') || label.toLowerCase().includes('epc')) return '⚡';
+                    if (label.toLowerCase().includes('tax')) return '🏛️';
+                    if (label.toLowerCase().includes('branch') || label.toLowerCase().includes('address')) return '🏦';
+                    if (label.toLowerCase().includes('capital') || label.toLowerCase().includes('repayment')) return '💰';
+                    if (label.toLowerCase().includes('interest')) return '📈';
+                    return '📋';
+                };
                 return (
                     <div key={id} className="grid grid-cols-2 gap-4 mb-6">
                         {items.map((item, i) => (
                             <div key={i} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-50 flex items-center gap-3 group hover:border-blue-100 transition-colors">
                                 <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-blue-600 group-hover:bg-blue-50 transition-colors">
-                                    {item.label.includes('Energy') ? '⚡' : item.label.includes('Tax') ? '🏛️' : '📋'}
+                                    {iconFor(item.label)}
                                 </div>
                                 <div>
                                     <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{item.label}</p>
@@ -270,15 +355,25 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                 );
             }
             case 'BenefitCard': {
+                const variant = component.variant || 'Green Home Reward';
+                const isWarning = variant.toLowerCase().includes('warning');
+                const isInfo = variant.toLowerCase().includes('info');
+
+                const theme = isWarning
+                    ? { bg: 'from-amber-50 to-orange-50', border: 'border-amber-100', icon: 'bg-amber-500 shadow-amber-200/50', emoji: '⚠️', label: 'text-amber-700', body: 'text-amber-900/80' }
+                    : isInfo
+                        ? { bg: 'from-blue-50 to-sky-50', border: 'border-blue-100', icon: 'bg-blue-500 shadow-blue-200/50', emoji: 'ℹ️', label: 'text-blue-700', body: 'text-blue-900/80' }
+                        : { bg: 'from-green-50 to-emerald-50', border: 'border-green-100', icon: 'bg-green-500 shadow-green-200/50', emoji: '🌿', label: 'text-green-700', body: 'text-green-800/70' };
+
                 return (
-                    <div key={id} className="w-full bg-gradient-to-br from-green-50 to-emerald-50 p-6 rounded-3xl border border-green-100 mb-6 flex items-center gap-5 animate-in slide-in-from-right-8 duration-1000">
-                        <div className="w-14 h-14 bg-green-500 rounded-2xl flex items-center justify-center text-2xl shadow-lg shadow-green-200/50">
-                            🌿
+                    <div key={id} className={`w-full bg-gradient-to-br ${theme.bg} p-6 rounded-3xl border ${theme.border} mb-6 flex items-center gap-5 animate-in slide-in-from-right-8 duration-1000`}>
+                        <div className={`w-14 h-14 ${theme.icon} rounded-2xl flex items-center justify-center text-2xl shadow-lg flex-shrink-0`}>
+                            {theme.emoji}
                         </div>
                         <div>
-                            <p className="text-[10px] font-black text-green-700 uppercase tracking-widest mb-1">{component.variant || 'Reward'}</p>
+                            <p className={`text-[10px] font-black ${theme.label} uppercase tracking-widest mb-1`}>{variant}</p>
                             <h4 className="text-lg font-black text-blue-950 leading-tight">{component.text}</h4>
-                            <p className="text-xs text-green-800/70 font-medium mt-1">{component.data?.detail as string}</p>
+                            <p className={`text-xs ${theme.body} font-medium mt-1`}>{component.data?.detail as string}</p>
                         </div>
                     </div>
                 );
@@ -302,6 +397,87 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction }) => {
                         />
                     </div>
                 );
+
+            // ── New components ──────────────────────────────────────────────
+
+            case 'Slider':
+                return <SliderWidget key={id} component={component} onAction={onAction} />;
+
+            case 'InfoCard':
+                return <InfoCardWidget key={id} component={component} />;
+
+            case 'StatCard': {
+                const d = (component.data || {}) as { value?: string; label?: string; sub?: string; trend?: string; trendUp?: boolean };
+                const label = d.label || component.text || '';
+                const trendColor = d.trendUp === false ? 'text-red-500' : 'text-green-600';
+                return (
+                    <div key={id} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 flex flex-col items-center text-center animate-in zoom-in-95 duration-500">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">{label}</p>
+                        <p className="text-5xl font-black text-blue-950 leading-none tabular-nums">{d.value ?? '—'}</p>
+                        {d.sub && <p className="text-xs text-slate-400 mt-3 font-semibold">{d.sub}</p>}
+                        {d.trend && <p className={`text-xs font-black mt-1.5 ${trendColor}`}>{d.trend}</p>}
+                    </div>
+                );
+            }
+
+            case 'ProgressBar': {
+                const d = (component.data || {}) as { value?: number; max?: number; label?: string };
+                const val = d.value ?? 0;
+                const max = d.max ?? 100;
+                const label = d.label || component.text || '';
+                const pct = Math.min(100, Math.round((val / max) * 100));
+                const isHigh = pct > 85;
+                const isMid = pct > 60;
+                const barColor = isHigh ? 'bg-red-500' : isMid ? 'bg-amber-500' : 'bg-green-500';
+                const textColor = isHigh ? 'text-red-600' : isMid ? 'text-amber-600' : 'text-green-600';
+                const borderColor = isHigh ? 'border-red-100' : isMid ? 'border-amber-100' : 'border-green-100';
+                const bgColor = isHigh ? 'bg-red-50' : isMid ? 'bg-amber-50' : 'bg-green-50';
+                return (
+                    <div key={id} className={`p-5 rounded-2xl border ${borderColor} ${bgColor} animate-in fade-in duration-700`}>
+                        <div className="flex justify-between items-center mb-3">
+                            <span className="text-xs font-bold text-gray-700">{label}</span>
+                            <span className={`text-sm font-black ${textColor}`}>{pct}%</span>
+                        </div>
+                        <div className="w-full h-3 bg-white/70 rounded-full overflow-hidden shadow-inner">
+                            <div
+                                className={`h-full ${barColor} rounded-full transition-all duration-1000 ease-out`}
+                                style={{ width: `${pct}%` }}
+                            />
+                        </div>
+                        <div className="flex justify-between text-[10px] text-gray-400 mt-2 font-semibold">
+                            <span>£0</span>
+                            <span>Max ~£{max.toLocaleString()}</span>
+                        </div>
+                    </div>
+                );
+            }
+
+            case 'Checklist': {
+                const items = (component.data?.items as { label: string; checked?: boolean; note?: string }[]) || [];
+                return (
+                    <div key={id} className="bg-white rounded-3xl border border-slate-100 p-6 shadow-sm animate-in fade-in duration-700">
+                        <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-5">{component.text || 'Checklist'}</h4>
+                        <div className="flex flex-col gap-3">
+                            {items.map((item, i) => (
+                                <div key={i} className={`flex items-start gap-3 p-3 rounded-xl transition-colors ${item.checked ? 'bg-green-50' : 'bg-slate-50'}`}>
+                                    <div className={`w-5 h-5 rounded-full flex-shrink-0 mt-0.5 flex items-center justify-center border-2 transition-colors ${item.checked ? 'bg-green-500 border-green-500' : 'border-slate-300 bg-white'}`}>
+                                        {item.checked && (
+                                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                            </svg>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <p className={`text-sm font-bold ${item.checked ? 'text-green-800' : 'text-slate-700'}`}>{item.label}</p>
+                                        {item.note && <p className="text-xs text-slate-400 mt-0.5">{item.note}</p>}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            }
+
             default:
                 return <div key={id} className="p-4 bg-red-50 text-red-500 rounded-xl border border-red-100 text-xs font-bold">MISSING COMPONENT: {component.component}</div>;
         }

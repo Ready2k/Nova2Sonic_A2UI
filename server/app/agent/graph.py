@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 import urllib.request
@@ -34,6 +35,40 @@ def _validate_address_uk(address: str) -> tuple[bool, float | None, float | None
     except Exception as e:
         logger.warning(f"Address validation error: {e}")
         return False, None, None
+
+
+# ─── Helper: Normalize spoken UK postcode ─────────────────────────────────────
+
+_SPOKEN_DIGITS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+
+def _normalize_spoken_to_postcode(text: str) -> str | None:
+    """
+    Try to extract a UK postcode from STT spoken-letter output.
+    e.g. "s. t. three five t. w." → "ST3 5TW"
+         "e c one a one b b"      → "EC1A 1BB"
+    Returns the normalized postcode string, or None if no valid pattern found.
+    """
+    # Remove dots/hyphens, collapse whitespace
+    cleaned = re.sub(r'[.\-]', ' ', text).strip()
+    # Convert number-words to digits, keep single letters, uppercase everything
+    tokens = cleaned.split()
+    parts = []
+    for tok in tokens:
+        lower = tok.lower()
+        if lower in _SPOKEN_DIGITS:
+            parts.append(_SPOKEN_DIGITS[lower])
+        elif len(tok) <= 3:          # single/double letters or digits
+            parts.append(tok.upper())
+        # discard longer filler words like "the", "and", etc.
+    joined = ''.join(parts)
+    # UK postcode regex: outward (1-2 letters + 1-2 digits + optional letter) + inward (1 digit + 2 letters)
+    match = re.search(r'([A-Z]{1,2}[0-9]{1,2}[A-Z]?)([0-9][A-Z]{2})', joined)
+    if match:
+        return f"{match.group(1)} {match.group(2)}"
+    return None
 
 
 # ─── Helper: Nearest Barclays branch via Overpass ─────────────────────────────
@@ -296,7 +331,32 @@ def interpret_intent(state: AgentState):
     # ── Address validation ────────────────────────────────────────────────────
     new_address = new_intent.get("address")
     old_address = intent.get("address")
-    if new_address and new_address != old_address:
+
+    # When address validation previously failed, the agent asked for a postcode.
+    # The user may now say just the postcode (e.g. "ST3 5TW" → STT transcribes as
+    # "s. t. three five t. w."). Detect and normalize it, then combine with the
+    # last known address for a better geocoding attempt.
+    if address_validation_failed and last_attempted_address:
+        spoken_pc = _normalize_spoken_to_postcode(transcript)
+        if spoken_pc:
+            logger.info(f"Detected spoken postcode in transcript: '{transcript}' → '{spoken_pc}'")
+            combined = f"{last_attempted_address}, {spoken_pc}"
+            success, vlat, vlng = _validate_address_uk(combined)
+            if not success:
+                # Try the postcode alone — Nominatim can resolve UK postcodes directly
+                success, vlat, vlng = _validate_address_uk(spoken_pc)
+            if success:
+                resolved_address = combined if new_address is None else new_address
+                new_intent["address"] = resolved_address
+                new_intent["lat"] = vlat
+                new_intent["lng"] = vlng
+                address_validation_failed = False
+                last_attempted_address = None
+                logger.info(f"Address resolved via postcode normalization: '{resolved_address}' -> ({vlat}, {vlng})")
+            else:
+                logger.warning(f"Postcode '{spoken_pc}' still not found — keeping validation_failed state")
+
+    if not address_validation_failed and new_address and new_address != old_address:
         # A new address was extracted — validate it against UK geocoding
         success, vlat, vlng = _validate_address_uk(new_address)
         if success:
@@ -316,9 +376,12 @@ def interpret_intent(state: AgentState):
     # ── Branch request detection ──────────────────────────────────────────────
     branch_keywords = [
         "nearest branch", "local branch", "visit a branch", "barclays near",
-        "nearest barclays", "pop in", "pop down", "speak to someone in person",
+        "nearest barclays", "pop in", "pop down",
+        "speak to someone in person", "speak to someone", "speak to a person",
+        "talk to someone", "talk to a person", "talk to an advisor",
         "visit in person", "find a branch", "where can i go", "go to a branch",
-        "walk in", "walk-in", "in-branch",
+        "go to a barclays", "go into a branch", "walk in", "walk-in", "in-branch",
+        "come in", "visit you", "see someone", "meet someone", "in person",
     ]
     branch_requested = any(kw in transcript.lower() for kw in branch_keywords)
 
@@ -423,13 +486,14 @@ def render_missing_inputs(state: AgentState):
     new_messages = []
 
     # ── Answer any process question first ────────────────────────────────────
-    if state.get("process_question"):
-        pq = state["process_question"]
+    faq_answer_text = None
+    faq_question_text = state.get("process_question")
+    if faq_question_text:
         ui_stage = state.get("ui", {}).get("state", "data collection")
-        answer = _answer_process_question(pq, intent, ui_stage)
-        logger.info(f"Answering process question: '{pq}' -> '{answer[:80]}...'")
-        new_outbox.append({"type": "server.voice.say", "payload": {"text": answer}})
-        new_messages.append({"role": "assistant", "text": answer})
+        faq_answer_text = _answer_process_question(faq_question_text, intent, ui_stage)
+        logger.info(f"Answering process question: '{faq_question_text}' -> '{faq_answer_text[:80]}...'")
+        new_outbox.append({"type": "server.voice.say", "payload": {"text": faq_answer_text}})
+        new_messages.append({"role": "assistant", "text": faq_answer_text})
 
     category = state.get("intent", {}).get("category", "a mortgage")
     just_selected = state.get("pendingAction", {}) and state.get("pendingAction", {}).get("data", {}).get("action") == "select_category"
@@ -712,6 +776,16 @@ def render_missing_inputs(state: AgentState):
             components.append(bc)
             components[0]["children"].append(bc["id"])
 
+    # Append FAQ InfoCard if a process question was answered this turn
+    if faq_answer_text and faq_question_text:
+        components.append({
+            "id": "faq_card",
+            "component": "InfoCard",
+            "text": faq_question_text,
+            "data": {"question": faq_question_text, "answer": faq_answer_text},
+        })
+        components[0]["children"].append("faq_card")
+
     payload = {
         "version": "v0.9",
         "updateComponents": {
@@ -765,12 +839,17 @@ def render_products_a2ui(state: AgentState):
     new_messages = []
 
     # ── Answer any process question first ────────────────────────────────────
-    if state.get("process_question"):
-        pq = state["process_question"]
-        answer = _answer_process_question(pq, intent, "product comparison")
-        logger.info(f"Answering process question (products): '{pq}' -> '{answer[:80]}...'")
-        new_outbox.append({"type": "server.voice.say", "payload": {"text": answer}})
-        new_messages.append({"role": "assistant", "text": answer})
+    products_faq_answer = None
+    products_faq_question = state.get("process_question")
+    if products_faq_question:
+        products_faq_answer = _answer_process_question(products_faq_question, intent, "product comparison")
+        logger.info(f"Answering process question (products): '{products_faq_question}' -> '{products_faq_answer[:80]}...'")
+        new_outbox.append({"type": "server.voice.say", "payload": {"text": products_faq_answer}})
+        new_messages.append({"role": "assistant", "text": products_faq_answer})
+
+    ty = intent.get("termYears", 25)
+    annual_income = intent.get("annualIncome")
+    loan_balance = intent.get("loanBalance")
 
     components = [
         {"id": "root", "component": "Column", "children": ["journey", "header_text"]}
@@ -782,7 +861,51 @@ def render_products_a2ui(state: AgentState):
         components[0]["children"].append("ltv_gauge")
         components.append({"id": "ltv_gauge", "component": "Gauge", "value": ltv, "max": 100})
 
+    # ── Affordability progress bar ────────────────────────────────────────────
+    if annual_income and loan_balance:
+        max_affordable = int(annual_income * 4.5)
+        components[0]["children"].append("affordability_bar")
+        components.append({
+            "id": "affordability_bar",
+            "component": "ProgressBar",
+            "text": "Borrowing Capacity",
+            "data": {
+                "value": loan_balance,
+                "max": max_affordable,
+                "label": f"Borrowing Capacity (max ~\u00a3{max_affordable:,} based on income)",
+            },
+        })
+        if loan_balance > max_affordable:
+            components[0]["children"].append("affordability_warning")
+            components.append({
+                "id": "affordability_warning",
+                "component": "BenefitCard",
+                "variant": "Warning",
+                "text": "Affordability Notice",
+                "data": {
+                    "detail": (
+                        f"Based on your income of \u00a3{annual_income:,}/yr, "
+                        f"the standard affordability limit is approximately \u00a3{max_affordable:,} "
+                        f"(4.5\u00d7 income). Your requested loan of \u00a3{loan_balance:,} exceeds this. "
+                        f"A mortgage specialist will review your full financial profile."
+                    )
+                },
+            })
+
     if products:
+        # Hero stat: best (lowest) monthly payment
+        best_monthly = min(p.get("monthlyPayment", 9999) for p in products)
+        components[0]["children"].append("monthly_stat")
+        components.append({
+            "id": "monthly_stat",
+            "component": "StatCard",
+            "data": {
+                "value": f"\u00a3{best_monthly:,.0f}",
+                "label": "Best Monthly Payment",
+                "sub": f"Over {ty} years \u2014 adjust the term below",
+            },
+        })
+
         components[0]["children"].append("market_insight")
         components.append({"id": "market_insight", "component": "ComparisonBadge", "text": "Market Leading: These rates are in the top 5% for your LTV tier"})
 
@@ -799,27 +922,14 @@ def render_products_a2ui(state: AgentState):
         components[0]["children"].append("pmt_breakdown")
         components.append({"id": "pmt_breakdown", "component": "DataCard", "data": {"items": breakdown}})
 
-    # ── Affordability check ───────────────────────────────────────────────────
-    annual_income = intent.get("annualIncome")
-    loan_balance = intent.get("loanBalance")
-    if annual_income and loan_balance:
-        max_affordable = annual_income * 4.5
-        if loan_balance > max_affordable:
-            components[0]["children"].append("affordability_warning")
-            components.append({
-                "id": "affordability_warning",
-                "component": "BenefitCard",
-                "variant": "Warning",
-                "text": "\u26a0\ufe0f Affordability Notice",
-                "data": {
-                    "detail": (
-                        f"Based on your income of \u00a3{annual_income:,}/yr, "
-                        f"the standard affordability limit is approximately \u00a3{int(max_affordable):,} "
-                        f"(4.5\u00d7 income). Your requested loan of \u00a3{loan_balance:,} exceeds this. "
-                        f"A mortgage specialist will review your full financial profile."
-                    )
-                },
-            })
+        # ── Term slider — lets user drag to recalculate in real time ─────────
+        components[0]["children"].append("term_slider")
+        components.append({
+            "id": "term_slider",
+            "component": "Slider",
+            "text": "Repayment Term",
+            "data": {"min": 5, "max": 35, "value": ty, "step": 1, "unit": " yrs", "label": "Repayment Term"},
+        })
 
     # ── Branch request handling ───────────────────────────────────────────────
     if state.get("branch_requested"):
@@ -864,6 +974,16 @@ def render_products_a2ui(state: AgentState):
                 "type": "server.voice.say",
                 "payload": {"text": "Once you share your property address, I can find your nearest Barclays branch!"},
             })
+
+    # FAQ InfoCard persisted in UI
+    if products_faq_answer and products_faq_question:
+        components.append({
+            "id": "faq_card",
+            "component": "InfoCard",
+            "text": products_faq_question,
+            "data": {"question": products_faq_question, "answer": products_faq_answer},
+        })
+        components[0]["children"].append("faq_card")
 
     payload = {
         "version": "v0.9",
@@ -1013,14 +1133,46 @@ def render_summary_a2ui(state: AgentState):
     product_id = selection.get("productId")
     products = state.get("products", [])
     selected_prod = next((p for p in products if p["id"] == product_id), None)
+    chosen = selected_prod or (products[0] if products else {})
     new_outbox = []
     new_messages = []
 
+    monthly = chosen.get("monthlyPayment", 0)
+    ty = state.get("intent", {}).get("termYears", 25)
+
     components = [
-        {"id": "root", "component": "Column", "children": ["journey", "summary_header", "summary_card", "disclaimer", "aip_button"]},
+        {"id": "root", "component": "Column", "children": [
+            "journey", "summary_header", "monthly_hero", "summary_card",
+            "docs_checklist", "disclaimer", "aip_button"
+        ]},
         {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 3}},
         {"id": "summary_header", "component": "Text", "text": "Your Agreement in Principle (AiP)", "variant": "h2"},
-        {"id": "summary_card", "component": "ProductCard", "data": selected_prod or (products[0] if products else {})},
+        {
+            "id": "monthly_hero",
+            "component": "StatCard",
+            "data": {
+                "value": f"\u00a3{monthly:,.0f}",
+                "label": "Monthly Repayment",
+                "sub": f"Fixed for {chosen.get('rate', '')}% over {ty} years",
+                "trend": "Rate locked — no surprises",
+                "trendUp": True,
+            },
+        },
+        {"id": "summary_card", "component": "ProductCard", "data": chosen},
+        {
+            "id": "docs_checklist",
+            "component": "Checklist",
+            "text": "Documents You\u2019ll Need",
+            "data": {
+                "items": [
+                    {"label": "Photo ID", "note": "Passport or UK driving licence", "checked": False},
+                    {"label": "Proof of address", "note": "Utility bill or bank statement (last 3 months)", "checked": False},
+                    {"label": "Last 3 months\u2019 payslips", "note": "Or SA302 if self-employed", "checked": False},
+                    {"label": "Last 3 months\u2019 bank statements", "note": "Main current account", "checked": False},
+                    {"label": "P60 (most recent)", "note": "Or last 2 years\u2019 accounts if self-employed", "checked": False},
+                ]
+            },
+        },
         {"id": "disclaimer", "component": "Text", "text": "Your home may be repossessed if you do not keep up repayments on your mortgage. Overall cost for comparison: 5.6% APRC Representative.", "variant": "body"},
         {"id": "aip_button", "component": "Button", "text": "Confirm Application", "data": {"action": "confirm_application"}}
     ]
@@ -1034,7 +1186,7 @@ def render_summary_a2ui(state: AgentState):
     }
     new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
 
-    msg = "I've prepared your summary. You can review it on screen and confirm if you want to proceed."
+    msg = "I've prepared your summary. You can see your monthly repayment and the documents you'll need on screen — confirm when you're ready."
     new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
     new_messages.append({"role": "assistant", "text": msg})
 
