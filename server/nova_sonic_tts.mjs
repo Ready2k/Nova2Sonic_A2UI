@@ -311,10 +311,10 @@ async function main() {
                 currentRole = eventData.contentStart.role;
                 currentContentType = eventData.contentStart.type;
 
-                const stage = extractGenerationStage(eventData.contentStart);
-                if (stage) currentGenerationStage = stage;
-
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO') {
+                    const stage = extractGenerationStage(eventData.contentStart);
+                    // Some blocks omit generationStage; default to FINAL so we don't drop audio.
+                    currentGenerationStage = stage || 'FINAL';
                     inAssistantAudioBlock = true;
                     speculativeChunks = []; // Reset buffer for new block
                     chunksEmittedInBlock = 0; // Reset count for new block
@@ -339,11 +339,9 @@ async function main() {
 
             if (eventData.contentEnd) {
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO' && inAssistantAudioBlock) {
-                    // Fallback: If the block ended and we haven't emitted ANY final chunks,
-                    // but we have speculative ones, emit the speculative ones now.
-                    // Only do this if no final chunks have been emitted globally — otherwise
-                    // a SPECULATIVE block followed by a FINAL block would play the audio twice.
-                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0 && chunksEmittedTotal === 0) {
+                    // Fallback: if this block had no FINAL chunks but did have speculative audio,
+                    // emit that block so later sentences are not dropped.
+                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
                         console.error(`[TTS DEBUG] ${nowIso()} Fallback: Emitting ${speculativeChunks.length} speculative chunks (no FINAL pass received)`);
                         for (const chunk of speculativeChunks) {
                             chunksEmittedInBlock++;
@@ -360,9 +358,11 @@ async function main() {
             }
 
             if (eventData.promptEnd) {
-                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Total emitted chunks=${chunksEmittedTotal}`);
+                // Prompt end can arrive before all buffered audioOutput events are drained.
+                // Do not break early; keep consuming the stream until it naturally ends.
+                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Continuing to drain stream. Total emitted chunks=${chunksEmittedTotal}`);
                 finishSignal();
-                break;
+                continue;
             }
 
             if (eventData.internalServerException) {
@@ -382,7 +382,7 @@ async function main() {
         }
 
         if (!canFinish) {
-            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${audioChunkCount}`);
+            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${chunksEmittedTotal}`);
             finishSignal();
         }
     } catch (e) {

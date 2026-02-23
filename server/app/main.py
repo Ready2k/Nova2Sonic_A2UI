@@ -111,35 +111,69 @@ async def process_outbox(websocket: WebSocket, sid: str):
         logger.info(f"[process_outbox] Processing {len(outbox)} events, {voice_say_count} voice.say events")
         
         # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
+        assistant_transcripts_sent = set()
         for event in outbox:
             if event["type"] != "server.voice.say":
                 logger.info(f"Emitting from outbox: {event['type']}")
                 await send_msg(websocket, sid, event["type"], event.get("payload"))
 
-        # Pass 2: handle voice.say last
-        for event in outbox:
-            if event["type"] == "server.voice.say":
-                text_to_speak = event.get("payload", {}).get("text", "")
-                logger.info(f"Emitting from outbox: server.voice.say -> '{text_to_speak[:60]}'")
-                # Echo to chat transcript immediately
-                await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
-                
-                # Skip TTS if client is in Text Only mode
-                if state.get("mode") == "text":
-                    logger.info("Skipping TTS (client in Text Only mode)")
-                    continue
+                if event["type"] == "server.transcript.final":
+                    payload = event.get("payload") or {}
+                    if payload.get("role") == "assistant":
+                        txt = (payload.get("text") or "").strip()
+                        if txt:
+                            assistant_transcripts_sent.add(txt)
 
-                # Send TTS if not already playing voice from another source
-                if not session_data.get("voice_playing"):
-                    logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
-                    session_data["voice_playing"] = True
-                    # Notify client immediately so it shows "Speaking" before first audio chunk
-                    await send_msg(websocket, sid, "server.voice.start", {})
-                    # Fire TTS as background task; store task so we can cancel on disconnect
-                    tts_task = asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
-                    session_data["tts_task"] = tts_task
-                else:
-                    logger.warning(f"[TTS] Skipping TTS - voice already playing")
+        # Pass 2: handle voice.say last.
+        # Some graph turns emit multiple voice.say events for a single assistant response
+        # (for example sentence-by-sentence or full-text + sentence chunks).
+        # Merge with de-duplication so the user hears the full response once.
+        voice_text_parts = []
+        for event in outbox:
+            if event["type"] != "server.voice.say":
+                continue
+
+            text_part = (event.get("payload", {}).get("text", "") or "").strip()
+            if not text_part:
+                continue
+
+            if not voice_text_parts:
+                voice_text_parts.append(text_part)
+                continue
+
+            merged_so_far = " ".join(voice_text_parts)
+            # Skip exact or contained duplicates.
+            if text_part == merged_so_far or text_part in merged_so_far:
+                continue
+            # If a later segment contains everything we've seen, prefer it.
+            if merged_so_far in text_part:
+                voice_text_parts = [text_part]
+                continue
+
+            voice_text_parts.append(text_part)
+
+        text_to_speak = " ".join(voice_text_parts).strip()
+        if text_to_speak:
+            logger.info(f"Emitting combined server.voice.say ({len(voice_text_parts)} merged parts) -> '{text_to_speak[:60]}'")
+
+            # Echo assistant transcript only if it hasn't already been emitted upstream.
+            if text_to_speak not in assistant_transcripts_sent:
+                await send_msg(websocket, sid, "server.transcript.final", {"text": text_to_speak, "role": "assistant"})
+
+            # Skip TTS if client is in Text Only mode
+            if state.get("mode") == "text":
+                logger.info("Skipping TTS (client in Text Only mode)")
+            # Send TTS if not already playing voice from another source
+            elif not session_data.get("voice_playing"):
+                logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
+                session_data["voice_playing"] = True
+                # Notify client immediately so it shows "Speaking" before first audio chunk
+                await send_msg(websocket, sid, "server.voice.start", {})
+                # Fire TTS as background task; store task so we can cancel on disconnect
+                tts_task = asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
+                session_data["tts_task"] = tts_task
+            else:
+                logger.warning("[TTS] Skipping TTS - voice already playing")
         
         # Clear thinking state
         await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
@@ -381,5 +415,4 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
 
