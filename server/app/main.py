@@ -37,6 +37,7 @@ sessions: Dict[str, dict] = {}
 def create_initial_state() -> AgentState:
     return {
         "mode": "text",
+        "device": "desktop",
         "transcript": "",
         "messages": [],
         "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25},
@@ -433,9 +434,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     traceback.print_exc()
                     
             elif msg_type == "client.mode.update":
-                new_mode = payload.get("mode", "text")
-                logger.info(f"Mode update from client: {new_mode}")
-                state["mode"] = new_mode
+                new_mode = payload.get("mode")
+                new_device = payload.get("device")
+                logger.info(f"Mode/Device update from client: mode={new_mode}, device={new_device}")
+                if new_mode:
+                    state["mode"] = new_mode
+                if new_device:
+                    state["device"] = new_device
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")

@@ -253,11 +253,11 @@ export function useMortgageSocket(url: string) {
         ws.onopen = () => {
             setConnected(true);
             ws.send(JSON.stringify({ type: 'client.hello', sessionId: clientSessionIdRef.current }));
-            // Also inform the server of the current UI mode (voice/text)
+            // Also inform the server of the current UI mode (voice/text) and device (mobile/desktop)
             ws.send(JSON.stringify({
                 type: 'client.mode.update',
                 sessionId: clientSessionIdRef.current,
-                payload: { mode: modeRef.current }
+                payload: { mode: modeRef.current, device: deviceRef.current }
             }));
             setSocket(ws);
         };
@@ -542,6 +542,9 @@ registerProcessor('pcm16-processor', PCM16Processor);
         setIsRecording(false);
     };
 
+    const [device, setDeviceState] = useState<'desktop' | 'mobile'>('desktop');
+    const deviceRef = useRef<'desktop' | 'mobile'>('desktop');
+
     const sendModeUpdate = useCallback((newMode: 'text' | 'voice') => {
         setModeState(newMode);
         modeRef.current = newMode;
@@ -550,7 +553,19 @@ registerProcessor('pcm16-processor', PCM16Processor);
         socket.send(JSON.stringify({
             type: 'client.mode.update',
             sessionId: clientSessionIdRef.current,
-            payload: { mode: newMode }
+            payload: { mode: newMode, device: deviceRef.current }
+        }));
+    }, [socket]);
+
+    const sendDeviceUpdate = useCallback((newDevice: 'desktop' | 'mobile') => {
+        setDeviceState(newDevice);
+        deviceRef.current = newDevice;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        console.log('[Hook] Sending device update:', newDevice);
+        socket.send(JSON.stringify({
+            type: 'client.mode.update',
+            sessionId: clientSessionIdRef.current,
+            payload: { mode: modeRef.current, device: newDevice }
         }));
     }, [socket]);
 
@@ -566,11 +581,13 @@ registerProcessor('pcm16-processor', PCM16Processor);
         sendAudioStart,
         sendAudioStop,
         sendModeUpdate,
+        sendDeviceUpdate,
         connect,
         disconnect,
         volume,
         isRecording,
         mode,
+        device,
         latency: { ttfb, uiPatchLatency, voiceLatency }
     };
 

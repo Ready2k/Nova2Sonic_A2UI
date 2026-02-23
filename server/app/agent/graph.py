@@ -203,6 +203,7 @@ def _answer_process_question(question: str, intent: dict, current_stage: str) ->
 
 class AgentState(TypedDict):
     mode: str
+    device: str
     transcript: str
     messages: Annotated[List[Dict[str, Any]], append_reducer]
     intent: Dict[str, Any]
@@ -291,9 +292,11 @@ def interpret_intent(state: AgentState):
                 if msg.get("role") == "user":
                     lc_messages.append(HumanMessage(content=msg.get("text", "")))
 
+            device = state.get("device", "desktop")
             current_prompt = (
                 f"Extract mortgage details from the user's latest response.\n"
                 f"Context: {last_question_context}\n"
+                f"Device: {device}\n"
                 f"Current known intent: {intent}\n"
                 f"User just said: '{transcript}'\n\n"
                 "Rules:\n"
@@ -550,10 +553,12 @@ def render_missing_inputs(state: AgentState):
 
                 messages = state.get("messages", [])
                 notes = intent.get("notes", "No personal context shared yet.")
+                device = state.get("device", "desktop")
                 user_msg = (
                     f"NOTES ON USER: {notes}\n"
                     f"HISTORY: {messages[-4:]}\n"
                     f"USER JUST SAID: '{state.get('transcript')}'\n"
+                    f"DEVICE: {device}\n"
                     f"FIELD NEEDED: {target_field}\n"
                     f"JUST SELECTED CATEGORY: {just_selected} (If true, acknowledge the selection of {category_label} warmly in your opening)\n"
                     f"{address_failure_note}\n\n"
@@ -664,25 +669,46 @@ def render_missing_inputs(state: AgentState):
         except:
             ftb_icon = remortgage_icon = btl_icon = moving_icon = ""
 
-        components = [
-            {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
-            {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
-            {"id": "options_grid", "component": "Column", "children": ["row_1", "row_2"]},
-            {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
-            {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
-            {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
-            {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
-            {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
-            {"id": "opt_remortgage", "component": "Column", "children": ["img_remortgage", "btn_remortgage"]},
-            {"id": "img_remortgage", "component": "Image", "data": {"url": f"data:image/png;base64,{remortgage_icon}"}, "text": "Remortgage"},
-            {"id": "btn_remortgage", "component": "Button", "text": "Remortgage", "data": {"action": "select_category", "category": "Remortgage"}},
-            {"id": "opt_btl", "component": "Column", "children": ["img_btl", "btn_btl"]},
-            {"id": "img_btl", "component": "Image", "data": {"url": f"data:image/png;base64,{btl_icon}"}, "text": "BTL"},
-            {"id": "btn_btl", "component": "Button", "text": "Buy-to-let", "data": {"action": "select_category", "category": "Buy-to-let"}},
-            {"id": "opt_moving", "component": "Column", "children": ["img_moving", "btn_moving"]},
-            {"id": "img_moving", "component": "Image", "data": {"url": f"data:image/png;base64,{moving_icon}"}, "text": "Moving"},
-            {"id": "btn_moving", "component": "Button", "text": "Moving home", "data": {"action": "select_category", "category": "Moving home"}}
-        ]
+        device = state.get("device", "desktop")
+        
+        if device == "mobile":
+            components = [
+                {"id": "root", "component": "Column", "children": ["header", "options_col"]},
+                {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
+                {"id": "options_col", "component": "Column", "children": ["opt_ftb", "opt_remortgage", "opt_btl", "opt_moving"]},
+                {"id": "opt_ftb", "component": "Row", "children": ["img_ftb", "btn_ftb"]},
+                {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
+                {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
+                {"id": "opt_remortgage", "component": "Row", "children": ["img_remortgage", "btn_remortgage"]},
+                {"id": "img_remortgage", "component": "Image", "data": {"url": f"data:image/png;base64,{remortgage_icon}"}, "text": "Remortgage"},
+                {"id": "btn_remortgage", "component": "Button", "text": "Remortgage", "data": {"action": "select_category", "category": "Remortgage"}},
+                {"id": "opt_btl", "component": "Row", "children": ["img_btl", "btn_btl"]},
+                {"id": "img_btl", "component": "Image", "data": {"url": f"data:image/png;base64,{btl_icon}"}, "text": "BTL"},
+                {"id": "btn_btl", "component": "Button", "text": "Buy-to-let", "data": {"action": "select_category", "category": "Buy-to-let"}},
+                {"id": "opt_moving", "component": "Row", "children": ["img_moving", "btn_moving"]},
+                {"id": "img_moving", "component": "Image", "data": {"url": f"data:image/png;base64,{moving_icon}"}, "text": "Moving"},
+                {"id": "btn_moving", "component": "Button", "text": "Moving home", "data": {"action": "select_category", "category": "Moving home"}}
+            ]
+        else:
+            components = [
+                {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
+                {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
+                {"id": "options_grid", "component": "Column", "children": ["row_1", "row_2"]},
+                {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
+                {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
+                {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
+                {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
+                {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
+                {"id": "opt_remortgage", "component": "Column", "children": ["img_remortgage", "btn_remortgage"]},
+                {"id": "img_remortgage", "component": "Image", "data": {"url": f"data:image/png;base64,{remortgage_icon}"}, "text": "Remortgage"},
+                {"id": "btn_remortgage", "component": "Button", "text": "Remortgage", "data": {"action": "select_category", "category": "Remortgage"}},
+                {"id": "opt_btl", "component": "Column", "children": ["img_btl", "btn_btl"]},
+                {"id": "img_btl", "component": "Image", "data": {"url": f"data:image/png;base64,{btl_icon}"}, "text": "BTL"},
+                {"id": "btn_btl", "component": "Button", "text": "Buy-to-let", "data": {"action": "select_category", "category": "Buy-to-let"}},
+                {"id": "opt_moving", "component": "Column", "children": ["img_moving", "btn_moving"]},
+                {"id": "img_moving", "component": "Image", "data": {"url": f"data:image/png;base64,{moving_icon}"}, "text": "Moving"},
+                {"id": "btn_moving", "component": "Button", "text": "Moving home", "data": {"action": "select_category", "category": "Moving home"}}
+            ]
         payload = {"version": "v0.9", "updateComponents": {"surfaceId": "main", "components": components}}
         new_outbox.append({"type": "server.a2ui.patch", "payload": payload})
         new_outbox.extend(branch_outbox_items)
