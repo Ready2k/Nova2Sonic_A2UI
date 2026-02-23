@@ -21,8 +21,10 @@ export default function Home() {
     sendModeUpdate,
     connect,
     disconnect,
+    volume,
     latency
   } = useMortgageSocket(wsUrl);
+
 
   const [mode, setMode] = useState<'text' | 'voice'>('text');
   const [textInput, setTextInput] = useState('');
@@ -184,15 +186,34 @@ export default function Home() {
               {/* Controls */}
               <div className="w-full flex justify-center pt-2 border-t border-slate-200/60 relative">
                 {mode === 'voice' ? (
-                  <button
-                    onClick={toggleRecording}
-                    className={`w-24 h-24 rounded-full flex items-center justify-center transition-all duration-200 mt-2 ${isRecording ? 'bg-red-500 scale-95 shadow-inner' : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-[0_10px_40px_-10px_rgba(37,99,235,0.7)] hover:-translate-y-2 hover:shadow-[0_20px_40px_-10px_rgba(37,99,235,0.9)]'}`}
-                  >
-                    <svg className="w-10 h-10 text-white fill-current" viewBox="0 0 24 24">
-                      <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-                      <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-                    </svg>
-                  </button>
+                  <div className="relative flex items-center justify-center">
+                    {/* Ring visualizer */}
+                    {isRecording && (
+                      <div
+                        className="absolute inset-0 rounded-full bg-red-400 opacity-20 animate-ping"
+                        style={{ transform: `scale(${1 + volume * 2})` }}
+                      ></div>
+                    )}
+                    <button
+                      onClick={toggleRecording}
+                      className={`w-24 h-24 rounded-full flex items-center justify-center transition-all duration-200 mt-2 z-10 ${isRecording ? 'bg-red-500 scale-95 shadow-inner' : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-[0_10px_40px_-10px_rgba(37,99,235,0.7)] hover:-translate-y-2 hover:shadow-[0_20px_40px_-10px_rgba(37,99,235,0.9)]'}`}
+                    >
+                      <svg className="w-10 h-10 text-white fill-current" viewBox="0 0 24 24">
+                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+                      </svg>
+                    </button>
+                    {/* Volume Bar Overlay (Simple) */}
+                    {isRecording && (
+                      <div className="absolute -bottom-8 w-32 h-1 bg-gray-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-red-500 transition-all duration-75"
+                          style={{ width: `${Math.min(100, volume * 500)}%` }}
+                        ></div>
+                      </div>
+                    )}
+                  </div>
+
                 ) : (
                   <div className="w-full flex flex-col gap-2">
                     {selectedImage && (

@@ -1,11 +1,12 @@
 import json
 
-def calculate_ltv(propertyValue: float, loanBalance: float) -> float:
+def calculate_ltv(propertyValue: float | None, loanBalance: float) -> float:
     """Calculate the Loan-to-Value percentage, rounded to 1 decimal place."""
-    if propertyValue <= 0:
+    if propertyValue is None or propertyValue <= 0:
         return 0.0
     val = (loanBalance / propertyValue) * 100
     return round(val, 1)
+
 
 def recalculate_monthly_payment(principal: float, annualRate: float, termYears: int, fee: float) -> dict:
     """

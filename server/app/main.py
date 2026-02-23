@@ -15,7 +15,8 @@ from .models import WebSocketMessage, ActionPayload
 from .agent.graph import app_graph, AgentState
 from .nova_sonic import NovaSonicSession
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Barclays Mortgage Assistant")
@@ -131,9 +132,12 @@ async def process_outbox(websocket: WebSocket, sid: str):
                 # Send TTS if not already playing voice from another source
                 if not session_data.get("voice_playing"):
                     logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
-                    # No active voice session — fire TTS as background task (non-blocking)
                     session_data["voice_playing"] = True
-                    asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
+                    # Notify client immediately so it shows "Speaking" before first audio chunk
+                    await send_msg(websocket, sid, "server.voice.start", {})
+                    # Fire TTS as background task; store task so we can cancel on disconnect
+                    tts_task = asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
+                    session_data["tts_task"] = tts_task
                 else:
                     logger.warning(f"[TTS] Skipping TTS - voice already playing")
         
@@ -249,11 +253,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         await session_data["sonic"].end_session()
                     except: pass
                 
-                # Note: Don't forward Nova Sonic's audio chunks to client - Nova Sonic is used for transcription only
-                # Its audio (acknowledgments like "Got it") should not be played back. Only capture the transcription.
+                # Nova Sonic is used for STT transcription only.
+                # The non-bidirectional API returns only assistant-role text (the model's echo of the user's speech).
+                # We capture all text output and treat it as the user's spoken words.
+                async def _on_text_chunk(text, is_user):
+                    await handle_text_chunk(text, is_user=True)
+
                 sonic = NovaSonicSession(
                     on_audio_chunk=lambda x: None,  # Suppress Nova Sonic's own audio output
-                    on_text_chunk=lambda t, iu: handle_text_chunk(t, iu) if iu else None, 
+                    on_text_chunk=_on_text_chunk,
                     on_finished=handle_finished
                 )
                 
@@ -261,26 +269,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 session_data["user_transcripts"] = []
                 
                 try:
-                    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-                    if not aws_access_key:
+                    if not os.getenv("AWS_ACCESS_KEY_ID"):
                         logger.warning("AWS Credentials not found. Nova Sonic will fail.")
-                    
-                    # Nova Sonic is the transcription layer only.
-                    # The graph (via handle_finished -> process_outbox) delivers the next question as TTS.
-                    # Nova should give a minimal acknowledgment ONLY — one word, then stop.
-                    current_intent = sessions[sid]["state"].get("intent", {})
-                    category = current_intent.get("category", "a mortgage")
-                    
-                    sys_prompt = (
-                        f"You are a Barclays mortgage assistant processing a {category} enquiry. "
-                        "Your ONLY role is to transcribe what the user says. "
-                        "STRICT RULES: "
-                        "1. After the user speaks, say ONLY one of: 'Got it.' or 'Thanks.' — nothing else. "
-                        "2. Never ask questions. Never give advice. Never explain anything. "
-                        "3. Do not say hello. Do not introduce yourself. "
-                        "4. One word or two-word acknowledgment maximum, then stop completely."
-                    )
-                    await sonic.start_session(system_prompt=sys_prompt)
+                    await sonic.start_session()
                     await sonic.start_audio_input()
                 except Exception as e:
                     logger.error(f"Failed to start Nova Sonic session: {e}", exc_info=True)
@@ -298,9 +289,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         
             elif msg_type == "client.audio.stop":
                 if session_data["sonic"]:
-                    await session_data["sonic"].end_audio_input()
-                
+                    # Run STT as a background task so the message loop is not blocked
+                    # (STT subprocess can take several seconds)
+                    asyncio.create_task(session_data["sonic"].end_audio_input())
+
             elif msg_type == "client.audio.interrupt":
+                # Cancel any in-flight TTS subprocess
+                if session_data.get("tts_task") and not session_data["tts_task"].done():
+                    session_data["tts_task"].cancel()
+                    session_data["tts_task"] = None
                 if session_data["sonic"]:
                     await session_data["sonic"].end_session()
                     session_data["sonic"] = None
@@ -373,8 +370,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 
     except WebSocketDisconnect:
         if session_id in sessions:
-            if sessions[session_id].get("sonic"):
-                asyncio.create_task(sessions[session_id]["sonic"].end_session())
+            sess = sessions[session_id]
+            # Cancel in-flight TTS so it doesn't try to send to the closed socket
+            if sess.get("tts_task") and not sess["tts_task"].done():
+                sess["tts_task"].cancel()
+            if sess.get("sonic"):
+                asyncio.create_task(sess["sonic"].end_session())
             del sessions[session_id]
 
 if __name__ == "__main__":

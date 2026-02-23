@@ -341,7 +341,9 @@ async function main() {
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO' && inAssistantAudioBlock) {
                     // Fallback: If the block ended and we haven't emitted ANY final chunks,
                     // but we have speculative ones, emit the speculative ones now.
-                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
+                    // Only do this if no final chunks have been emitted globally — otherwise
+                    // a SPECULATIVE block followed by a FINAL block would play the audio twice.
+                    if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0 && chunksEmittedTotal === 0) {
                         console.error(`[TTS DEBUG] ${nowIso()} Fallback: Emitting ${speculativeChunks.length} speculative chunks (no FINAL pass received)`);
                         for (const chunk of speculativeChunks) {
                             chunksEmittedInBlock++;

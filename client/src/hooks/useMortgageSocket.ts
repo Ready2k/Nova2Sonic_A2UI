@@ -9,10 +9,10 @@ export interface ActionPayload {
 class AudioStreamer {
     private audioContext: AudioContext;
     private nextStartTime: number | null = null;
-    private isInitialized: boolean = false;
     private chunkQueue: string[] = [];
     private isProcessing: boolean = false;
     private isAcceptingChunks: boolean = true;
+    private lastSource: AudioBufferSourceNode | null = null;
 
     constructor() {
         this.audioContext = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)({ sampleRate: 24000 });
@@ -34,9 +34,8 @@ class AudioStreamer {
     private async processQueue() {
         if (this.isProcessing) return;
         this.isProcessing = true;
-
         try {
-            while (this.chunkQueue.length > 0 && this.isAcceptingChunks) {
+            while (this.chunkQueue.length > 0) {
                 const chunk = this.chunkQueue.shift();
                 if (chunk) {
                     await this._playChunk(chunk);
@@ -47,9 +46,22 @@ class AudioStreamer {
         }
     }
 
+    /** Resolves once the queue is empty and no processing is in flight. */
+    public waitForQueueDrained(): Promise<void> {
+        return new Promise((resolve) => {
+            const check = () => {
+                if (!this.isProcessing && this.chunkQueue.length === 0) {
+                    resolve();
+                } else {
+                    setTimeout(check, 10);
+                }
+            };
+            check();
+        });
+    }
+
     private async _playChunk(base64: string) {
         try {
-            // Ensure audio context is running
             await this.ensureResumed();
 
             const binaryString = window.atob(base64);
@@ -72,23 +84,20 @@ class AudioStreamer {
             source.buffer = audioBuffer;
             source.connect(this.audioContext.destination);
 
-            // Initialize nextStartTime on first chunk
             if (this.nextStartTime === null) {
                 this.nextStartTime = this.audioContext.currentTime;
-                this.isInitialized = true;
                 console.log('[AudioStreamer] First chunk - scheduling from', this.nextStartTime);
             }
 
             const currentTime = this.audioContext.currentTime;
-            // Ensure we don't schedule in the past (with small buffer)
             if (this.nextStartTime < currentTime) {
                 console.warn('[AudioStreamer] Scheduling time is in past, resetting. current:', currentTime, 'next:', this.nextStartTime);
-                this.nextStartTime = currentTime + 0.01; // Small buffer
+                this.nextStartTime = currentTime + 0.01;
             }
 
-            console.log('[AudioStreamer] Playing chunk at', this.nextStartTime, 'duration:', audioBuffer.duration, 'buffer_size:', audioBuffer.length);
             source.start(this.nextStartTime);
             this.nextStartTime += audioBuffer.duration;
+            this.lastSource = source; // Always track the last scheduled source
         } catch (err) {
             console.error('[AudioStreamer] Error playing chunk:', err);
             throw err;
@@ -100,20 +109,54 @@ class AudioStreamer {
             console.warn('[AudioStreamer] Not accepting new chunks');
             return;
         }
-        // Queue the chunk and process sequentially
         this.chunkQueue.push(base64);
         await this.processQueue();
     }
 
-    public stopAcceptingChunks() {
-        console.log('[AudioStreamer] Stopped accepting new chunks, current queue size:', this.chunkQueue.length);
+    /**
+     * Graceful finish: stop accepting chunks, let the queue fully drain,
+     * then wait for the last AudioBufferSourceNode to fire `onended` before
+     * closing the context and calling onDone. A generous timer fallback is
+     * included in case `onended` doesn't fire (e.g. context closed externally).
+     */
+    public finishPlayback(onDone: () => void) {
         this.isAcceptingChunks = false;
+        let settled = false;
+
+        const cleanup = () => {
+            if (settled) return;
+            settled = true;
+            console.log('[AudioStreamer] Playback complete — closing context');
+            if (this.audioContext.state !== 'closed') {
+                this.audioContext.close().catch(() => { });
+            }
+            this.nextStartTime = null;
+            this.isProcessing = false;
+            onDone();
+        };
+
+        this.waitForQueueDrained().then(() => {
+            const remainingMs = this.getScheduledDurationMs();
+            console.log(`[AudioStreamer] Queue drained; ${remainingMs.toFixed(0)} ms of audio remaining`);
+
+            if (remainingMs <= 50 || !this.lastSource) {
+                // Nothing left scheduled (or never started)
+                cleanup();
+                return;
+            }
+
+            // Primary signal: fires precisely when the last buffer finishes
+            this.lastSource.onended = cleanup;
+            // Safety net: close no earlier than remainingMs + 3 s buffer
+            setTimeout(cleanup, remainingMs + 3000);
+        });
     }
 
+    /** Immediate stop — use for interrupts or disconnect. */
     public stop() {
-        console.log('[AudioStreamer] Stopping, context state:', this.audioContext.state);
+        console.log('[AudioStreamer] Immediate stop, context state:', this.audioContext.state);
         this.isAcceptingChunks = false;
-        this.chunkQueue = []; // Clear any queued chunks
+        this.chunkQueue = [];
         if (this.audioContext.state !== 'closed') {
             try {
                 this.audioContext.close();
@@ -122,8 +165,14 @@ class AudioStreamer {
             }
         }
         this.nextStartTime = null;
-        this.isInitialized = false;
         this.isProcessing = false;
+    }
+
+    /** Milliseconds until the last scheduled buffer finishes. */
+    public getScheduledDurationMs(): number {
+        if (this.nextStartTime === null) return 0;
+        const remaining = (this.nextStartTime - this.audioContext.currentTime) * 1000;
+        return Math.max(0, remaining);
     }
 }
 
@@ -136,6 +185,8 @@ export function useMortgageSocket(url: string) {
     const [voicePlaying, setVoicePlaying] = useState(false);
     const [a2uiState, setA2uiState] = useState<A2UIPayload | null>(null);
     const [thinkingState, setThinkingState] = useState<string | null>(null);
+    const [volume, setVolume] = useState(0);
+
 
     const [ttfb, setTtfb] = useState<number | null>(null);
     const [uiPatchLatency, setUiPatchLatency] = useState<number | null>(null);
@@ -161,20 +212,11 @@ export function useMortgageSocket(url: string) {
     }, [hookId]);
 
     const stopAudioBuffer = useCallback(() => {
-        // Gracefully stop accepting new chunks and let current playback finish
+        // Immediate stop — used on disconnect or component unmount.
         if (streamerRef.current) {
-            console.log('[Hook] Gracefully stopping audio playback, streamer exists');
-            streamerRef.current.stopAcceptingChunks();
-            // Clean up after playback has had time to finish (don't close immediately)
-            setTimeout(() => {
-                if (streamerRef.current) {
-                    console.log('[Hook] Closing audio streamer');
-                    streamerRef.current.stop();
-                    streamerRef.current = null;
-                }
-            }, 3000); // 3 second timeout to allow current chunks to finish
-        } else {
-            console.log('[Hook] stopAudioBuffer called but no streamer exists');
+            console.log('[Hook] Stopping audio immediately (disconnect/unmount)');
+            streamerRef.current.stop();
+            streamerRef.current = null;
         }
         setVoicePlaying(false);
     }, []);
@@ -224,6 +266,16 @@ export function useMortgageSocket(url: string) {
                 });
             } else if (type === 'server.agent.thinking') {
                 setThinkingState(payload.state);
+            } else if (type === 'server.voice.start') {
+                // Server signals TTS is about to begin — show Speaking indicator immediately
+                // before the first audio chunk arrives (subprocess takes a few seconds to start)
+                if (!streamerRef.current) {
+                    streamerRef.current = new AudioStreamer();
+                }
+                setVoicePlaying(true);
+                if (requestStartRef.current) {
+                    setVoiceLatency(Date.now() - requestStartRef.current);
+                }
             } else if (type === 'server.voice.audio') {
                 console.log('[WebSocket] Received server.voice.audio, streamer exists:', !!streamerRef.current);
                 if (!streamerRef.current) {
@@ -244,15 +296,14 @@ export function useMortgageSocket(url: string) {
                 console.log('[WebSocket] Received server.voice.stop, streamer exists:', !!streamerRef.current);
                 if (streamerRef.current) {
                     const oldStreamer = streamerRef.current;
-                    // Null out IMMEDIATELY so the NEXT server.voice.audio creates a fresh streamer.
-                    // We keep oldStreamer alive via local ref so its already-scheduled WebAudio
-                    // buffers can play through to completion.
+                    // Null out immediately so the next server.voice.audio creates a fresh streamer.
                     streamerRef.current = null;
-                    oldStreamer.stopAcceptingChunks();
-                    // Tear down the AudioContext after already-queued audio has played out
-                    setTimeout(() => oldStreamer.stop(), 4000);
+                    // Let all queued chunks finish scheduling, then wait for the last
+                    // AudioBufferSourceNode.onended before closing the context.
+                    oldStreamer.finishPlayback(() => {
+                        setVoicePlaying(false);
+                    });
                 }
-                setTimeout(() => setVoicePlaying(false), 2000);
             } else if (type === 'server.a2ui.patch') {
                 if (!uiPatchLatencyRef.current && requestStartRef.current) {
                     setUiPatchLatency(Date.now() - requestStartRef.current);
@@ -318,12 +369,15 @@ export function useMortgageSocket(url: string) {
         setUiPatchLatency(null);
         setVoiceLatency(null);
 
-        if (voicePlaying) {
-            // Send interrupt to server - don't close audio locally, let it finish
+        // If audio is playing, stop it immediately and tell the server
+        if (streamerRef.current) {
             socket.send(JSON.stringify({
                 type: 'client.audio.interrupt',
                 sessionId: clientSessionIdRef.current
             }));
+            streamerRef.current.stop();
+            streamerRef.current = null;
+            setVoicePlaying(false);
         }
 
         socket.send(JSON.stringify({
@@ -354,24 +408,36 @@ class PCM16Processor extends AudioWorkletProcessor {
     this.bufferSize = 4096;
     this.buffer = new Int16Array(this.bufferSize);
     this.bufferIndex = 0;
+    this.lastVolumeSampleTime = 0;
   }
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     if (input && input.length > 0) {
       const float32Data = input[0];
+      let sumSq = 0;
       for (let i = 0; i < float32Data.length; i++) {
-        this.buffer[this.bufferIndex++] = Math.max(-32768, Math.min(32767, Math.floor(float32Data[i] * 32768)));
+        const sample = float32Data[i];
+        sumSq += sample * sample;
+        this.buffer[this.bufferIndex++] = Math.max(-32768, Math.min(32767, Math.floor(sample * 32768)));
         if (this.bufferIndex >= this.bufferSize) {
           const outBuffer = new Int16Array(this.buffer);
-          this.port.postMessage(outBuffer.buffer, [outBuffer.buffer]);
+          this.port.postMessage({ type: 'audio', buffer: outBuffer.buffer }, [outBuffer.buffer]);
           this.bufferIndex = 0;
         }
+      }
+      
+      const currentTime = Date.now();
+      if (currentTime - this.lastVolumeSampleTime > 100) {
+        const rms = Math.sqrt(sumSq / float32Data.length);
+        this.port.postMessage({ type: 'volume', volume: rms });
+        this.lastVolumeSampleTime = currentTime;
       }
     }
     return true;
   }
 }
 registerProcessor('pcm16-processor', PCM16Processor);
+
 `;
             const blob = new Blob([workletCode], { type: 'application/javascript' });
             const workletUrl = URL.createObjectURL(blob);
@@ -381,7 +447,12 @@ registerProcessor('pcm16-processor', PCM16Processor);
             recordingProcessorRef.current = workletNode as unknown as ScriptProcessorNode;
 
             workletNode.port.onmessage = (e) => {
-                const buffer = e.data;
+                if (e.data.type === 'volume') {
+                    setVolume(e.data.volume);
+                    return;
+                }
+
+                const buffer = e.data.buffer;
                 const int16Array = new Int16Array(buffer);
                 const uint8Array = new Uint8Array(int16Array.buffer);
                 let binary = '';
@@ -389,6 +460,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
                     binary += String.fromCharCode(uint8Array[i]);
                 }
                 const base64 = btoa(binary);
+
 
                 if (socket && socket.readyState === WebSocket.OPEN) {
                     console.log("[Audio] Sending chunk of size", base64.length);
@@ -414,6 +486,8 @@ registerProcessor('pcm16-processor', PCM16Processor);
         requestStartRef.current = Date.now();
 
         stopRecording();
+        setVolume(0);
+
 
         if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({
@@ -423,7 +497,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
         }
     };
 
-    const sendModeUpdate = (newMode: 'text' | 'voice') => {
+    const sendModeUpdate = useCallback((newMode: 'text' | 'voice') => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         console.log('[Hook] Sending mode update:', newMode);
         socket.send(JSON.stringify({
@@ -431,7 +505,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
             sessionId: clientSessionIdRef.current,
             payload: { mode: newMode }
         }));
-    };
+    }, [socket]);
 
     return {
         connected,
@@ -446,6 +520,8 @@ registerProcessor('pcm16-processor', PCM16Processor);
         sendModeUpdate,
         connect,
         disconnect,
+        volume,
         latency: { ttfb, uiPatchLatency, voiceLatency }
     };
+
 }
