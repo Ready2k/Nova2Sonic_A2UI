@@ -7,10 +7,10 @@
 FROM python:3.12-slim
 
 # ── System dependencies ────────────────────────────────────────────────────────
-# Install Node.js 18 (required for nova_sonic_stt.mjs and nova_sonic_tts.mjs)
+# Install Node.js 20 (required for nova_sonic_stt.mjs and nova_sonic_tts.mjs)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
