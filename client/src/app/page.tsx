@@ -132,7 +132,7 @@ export default function Home() {
 
   const renderChatLog = (isMobileView = false) => (
     <div className={`flex-1 overflow-y-auto w-full pr-2 space-y-4 mb-4 mt-2 no-scrollbar ${isMobileView ? 'px-4' : ''}`}>
-      {messages.length === 0 && !thinkingState && !voicePlaying && (
+      {messages.length === 0 && !thinkingState && !voicePlaying && !isMobileView && (
         <div className="h-full flex items-center justify-center text-center">
           <div className="text-gray-400 text-[11px] font-bold uppercase tracking-widest opacity-60">
             {mode === 'voice' ? 'Awaiting Voice...' : 'Send Message...'}
@@ -145,7 +145,7 @@ export default function Home() {
             <Image src={msg.image} alt="User Upload" width={128} height={128} className="w-32 h-32 object-cover rounded-xl shadow-sm border border-gray-200" unoptimized />
           )}
           {msg.text && (
-            <div className={`rounded-2xl px-4 py-2 shadow-sm max-w-[85%] text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-white border border-gray-200 text-gray-800 rounded-tl-sm leading-relaxed'}`}>
+            <div className={`rounded-2xl ${isMobileView ? 'px-3 py-1.5' : 'px-4 py-2'} shadow-sm max-w-[85%] text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-white border border-gray-200 text-gray-800 rounded-tl-sm leading-relaxed'}`}>
               {msg.text}
             </div>
           )}
@@ -243,7 +243,7 @@ export default function Home() {
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
               placeholder={compact ? "Type message..." : "How can I help you today?"}
-              className={`flex-1 bg-white border border-gray-200 rounded-xl ${compact ? 'pl-3 pr-16 py-2.5' : 'pl-4 pr-24 py-3.5'} text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none shadow-sm transition-all text-gray-800 placeholder-gray-400`}
+              className={`flex-1 bg-white border border-gray-200 rounded-xl ${compact ? 'pl-3 pr-16 py-2' : 'pl-4 pr-24 py-3.5'} text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none shadow-sm transition-all text-gray-800 placeholder-gray-400`}
             />
             <button
               type="submit"
@@ -403,27 +403,39 @@ export default function Home() {
                 {/* Mobile Scrollable Area */}
                 <div className="flex-1 overflow-y-auto flex flex-col relative no-scrollbar">
                   {/* App Header */}
-                  <div className="px-6 pt-4 pb-4 border-b border-gray-100 flex items-center gap-3 sticky top-0 bg-white/80 backdrop-blur-md z-[60]">
-                    <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-black text-sm">B</div>
-                    <div>
-                      <h2 className="text-sm font-black text-blue-950 leading-none">Mortgage</h2>
-                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Assistant AI</p>
+                  <div className="px-6 pt-4 pb-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-[60]">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-black text-sm">B</div>
+                      <div>
+                        <h2 className="text-sm font-black text-blue-950 leading-none">Mortgage</h2>
+                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Assistant AI</p>
+                      </div>
                     </div>
+                    {/* Barclays Eagle Logo for existing customers */}
+                    {a2uiState?.isExistingCustomer && (
+                      <div className="w-8 h-8 flex items-center justify-center animate-in fade-in zoom-in duration-500">
+                        <img
+                          src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAMAAABF0y+mAAAAM1BMVEVHcEwAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+lRZTNJAAAAEXRSTlMAPIejVCr/ZK/Yyue/95UZeLE8H+YAAACjSURBVHgBrc5bisQgFEXRY9RtfGf+o23aRJAuG4qi1u/lbK6+whzWac/zK2jLmwM49eKIyUjKUCSFmJZABJBUIT/9pkfg7hkAPwLQ12FulqG1uk7ZyRo8WxrMx0fP1hsPKbNx6tbYcLp1IFIig61EQFPhKnhu0XElLk09iSvw6KkqamGLmJKq08rphCnISCvDQn8Fpur1oicGqy2TwHb9p+t9P78sCiCxm+C+AAAAAElFTkSuQmCC"
+                          alt="Barclays Eagle"
+                          className="w-6 h-6 object-contain"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {/* Main A2UI Content */}
-                  <div className="p-4 flex flex-col flex-1 min-h-0 bg-slate-50/50">
+                  <div className="px-4 py-2 flex flex-col flex-1 min-h-0 bg-slate-50/50">
                     <div className="flex-1">
                       <A2Renderer a2uiState={a2uiState} onAction={sendAction} isMobile={isMobile} />
                     </div>
-                    <div className="h-40 flex-shrink-0"></div> {/* Spacer for bottom shadow/chat */}
+                    <div className="h-10 flex-shrink-0"></div> {/* Reduced spacer for bottom shadow/chat */}
                   </div>
 
                   {/* Floating Support Button in Mobile */}
                   {a2uiState?.showSupport && (
                     <div className="px-4 py-3 sticky bottom-4 z-50">
                       <button
-                        onClick={() => alert("Connecting tool specialized mobile support...")}
+                        onClick={() => alert("Connecting you to a Mortgage Specialist...")}
                         className="w-full bg-blue-600 text-white rounded-2xl py-3 px-4 shadow-xl border-2 border-blue-400/30 flex items-center justify-center gap-3 active:scale-95 transition-transform"
                       >
                         <span className="text-lg">📞</span>
@@ -434,14 +446,14 @@ export default function Home() {
                 </div>
 
                 {/* Mobile Bottom Chat Component */}
-                <div className="bg-white border-t border-gray-100 p-4 pb-8 shadow-[0_-10px_30px_rgba(0,0,0,0.05)] z-50">
-                  <div className="max-h-[160px] flex flex-col overflow-hidden mb-3">
+                <div className="bg-white border-t border-gray-100 p-3 pb-6 shadow-[0_-10px_30px_rgba(0,0,0,0.05)] z-50">
+                  <div className="max-h-[160px] flex flex-col overflow-hidden mb-2">
                     {renderChatLog(true)}
                   </div>
                   {renderChatControls(true)}
 
                   {/* iPhone Home Indicator */}
-                  <div className="w-32 h-1.5 bg-black/10 rounded-full mx-auto mt-6"></div>
+                  <div className="w-32 h-1.5 bg-black/10 rounded-full mx-auto mt-4"></div>
                 </div>
               </div>
 

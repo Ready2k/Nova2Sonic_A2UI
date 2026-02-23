@@ -436,11 +436,31 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "client.mode.update":
                 new_mode = payload.get("mode")
                 new_device = payload.get("device")
+                old_device = state.get("device", "desktop")
                 logger.info(f"Mode/Device update from client: mode={new_mode}, device={new_device}")
+                
                 if new_mode:
                     state["mode"] = new_mode
                 if new_device:
                     state["device"] = new_device
+
+                # If the device changed, push a new UI update immediately
+                if new_device and new_device != old_device:
+                    from app.agent.graph import render_missing_inputs, render_products_a2ui
+                    
+                    # Determine which rendering logic to use based on current progress
+                    intent = state.get("intent", {})
+                    if intent.get("category") and state.get("products"):
+                        update = render_products_a2ui(state)
+                    else:
+                        update = render_missing_inputs(state)
+                    
+                    # Extract outbox items and send them
+                    if "outbox" in update:
+                        for item in update["outbox"]:
+                            await websocket.send_json(item)
+                        # Sync state updates back to session
+                        state.update({k: v for k, v in update.items() if k != "outbox"})
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")

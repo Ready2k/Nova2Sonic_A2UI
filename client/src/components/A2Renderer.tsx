@@ -20,6 +20,7 @@ export interface A2UIUpdateComponents {
 export interface A2UIPayload {
     version: string;
     showSupport?: boolean;
+    isExistingCustomer?: boolean;
     updateComponents: A2UIUpdateComponents;
 }
 
@@ -134,7 +135,7 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction, isMobile }
         switch (component.component) {
             case 'Column':
                 return (
-                    <div key={id} data-a2-id={id} className={`flex flex-col ${isMobile ? 'gap-4' : 'gap-6'} w-full animate-in fade-in slide-in-from-bottom-4 duration-700`}>
+                    <div key={id} data-a2-id={id} className={`flex flex-col ${isMobile ? 'gap-2' : 'gap-6'} w-full animate-in fade-in slide-in-from-bottom-4 duration-700`}>
                         {children}
                     </div>
                 );
@@ -150,19 +151,23 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction, isMobile }
                     h2: 'text-xl font-black tracking-tight border-b border-blue-100 pb-1.5 mb-2',
                     h3: 'text-lg font-bold',
                     body: 'text-[13px] leading-relaxed',
+                    caption: 'text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 text-center w-full py-4',
                 }[component.variant || 'body'] : {
                     h1: 'text-3xl font-black tracking-tight',
                     h2: 'text-2xl font-black tracking-tight border-b border-blue-100 pb-2 mb-2',
                     h3: 'text-xl font-bold',
                     body: 'text-sm leading-relaxed',
+                    caption: 'text-[11px] font-black uppercase tracking-[0.2em] text-slate-400 text-center w-full py-6',
                 }[component.variant || 'body'];
                 const focusClasses = component.focus
                     ? 'text-blue-600 animate-pulse'
-                    : component.variant === 'h1' || component.variant === 'h2'
-                        ? 'text-blue-950'
-                        : component.variant === 'h3'
-                            ? 'text-gray-900'
-                            : 'text-gray-600';
+                    : component.variant === 'caption'
+                        ? '' // No extra classes for caption
+                        : component.variant === 'h1' || component.variant === 'h2'
+                            ? 'text-blue-950'
+                            : component.variant === 'h3'
+                                ? 'text-gray-900'
+                                : 'text-gray-600';
                 return (
                     <p key={id} data-a2-id={id} data-a2-focused={component.focus} className={`${baseVariant} ${focusClasses} transition-colors duration-300`}>
                         {component.text}
@@ -458,6 +463,51 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction, isMobile }
                             <span>£0</span>
                             <span>Max ~£{max.toLocaleString()}</span>
                         </div>
+                    </div>
+                );
+            }
+
+            case 'ListItem': {
+                const d = (component.data || {}) as { subtext?: string; rightText?: string; url?: string; action?: string };
+                return (
+                    <div
+                        key={id}
+                        data-a2-id={id}
+                        data-a2-focused={component.focus}
+                        className={`flex items-center ${isMobile ? 'gap-3' : 'gap-5'} ${isMobile ? 'py-2.5' : 'py-4'} px-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50/80 transition-all active:scale-[0.98] group ${component.focus ? 'bg-blue-50/50' : ''}`}
+                        onClick={() => onAction(id, component.data)}
+                    >
+                        {d.url && (
+                            <div className={`${isMobile ? 'w-10 h-10' : 'w-14 h-14'} rounded-full overflow-hidden flex-shrink-0 bg-slate-100 shadow-sm ring-2 ${component.focus ? 'ring-blue-100' : 'ring-white'} group-hover:ring-blue-100 transition-all`}>
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={d.url} alt={component.text} className="w-full h-full object-cover" />
+                            </div>
+                        )}
+                        {!d.url && (
+                            <div className={`${isMobile ? 'w-10 h-10' : 'w-14 h-14'} rounded-full flex-shrink-0 bg-slate-50 flex items-center justify-center text-slate-300 ring-2 ring-white`}>
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            </div>
+                        )}
+                        <div className="flex-1 min-w-0 ml-1">
+                            <p className={`${isMobile ? 'text-[15px]' : 'text-base'} font-black text-blue-950 group-hover:text-blue-700 transition-colors`}>
+                                {component.text}
+                            </p>
+                            {d.subtext && (
+                                <p className={`${isMobile ? 'text-[9px]' : 'text-[11px]'} font-bold text-slate-400 uppercase tracking-widest mt-0.5 truncate`}>
+                                    {d.subtext}
+                                </p>
+                            )}
+                        </div>
+                        {d.rightText && (
+                            <span className={`${isMobile ? 'text-[9px]' : 'text-[11px]'} font-black uppercase tracking-[0.2em] text-slate-300 flex-shrink-0 ml-auto`}>
+                                {d.rightText}
+                            </span>
+                        )}
+                        {!d.rightText && (
+                            <div className="w-7 h-7 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 group-hover:bg-blue-600 group-hover:text-white transition-all ml-2 flex-shrink-0">
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M9 5l7 7-7 7" /></svg>
+                            </div>
+                        )}
                     </div>
                 );
             }

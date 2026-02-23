@@ -673,21 +673,68 @@ def render_missing_inputs(state: AgentState):
         
         if device == "mobile":
             components = [
-                {"id": "root", "component": "Column", "children": ["header", "options_col"]},
-                {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
-                {"id": "options_col", "component": "Column", "children": ["opt_ftb", "opt_remortgage", "opt_btl", "opt_moving"]},
-                {"id": "opt_ftb", "component": "Row", "children": ["img_ftb", "btn_ftb"]},
-                {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
-                {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
-                {"id": "opt_remortgage", "component": "Row", "children": ["img_remortgage", "btn_remortgage"]},
-                {"id": "img_remortgage", "component": "Image", "data": {"url": f"data:image/png;base64,{remortgage_icon}"}, "text": "Remortgage"},
-                {"id": "btn_remortgage", "component": "Button", "text": "Remortgage", "data": {"action": "select_category", "category": "Remortgage"}},
-                {"id": "opt_btl", "component": "Row", "children": ["img_btl", "btn_btl"]},
-                {"id": "img_btl", "component": "Image", "data": {"url": f"data:image/png;base64,{btl_icon}"}, "text": "BTL"},
-                {"id": "btn_btl", "component": "Button", "text": "Buy-to-let", "data": {"action": "select_category", "category": "Buy-to-let"}},
-                {"id": "opt_moving", "component": "Row", "children": ["img_moving", "btn_moving"]},
-                {"id": "img_moving", "component": "Image", "data": {"url": f"data:image/png;base64,{moving_icon}"}, "text": "Moving"},
-                {"id": "btn_moving", "component": "Button", "text": "Moving home", "data": {"action": "select_category", "category": "Moving home"}}
+                {"id": "root", "component": "Column", "children": ["header", "options_list"]},
+                {"id": "header", "component": "Text", "text": "Mortgage Options", "variant": "h2"},
+                {"id": "options_list", "component": "Column", "children": ["opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
+                
+                {
+                    "id": "opt_ftb", 
+                    "component": "ListItem", 
+                    "text": "First-time Buyer", 
+                    "data": {
+                        "number": "01",
+                        "subtext": "Starting your journey",
+                        "rightText": "GUIDE",
+                        "url": f"data:image/png;base64,{ftb_icon}",
+                        "action": "select_category", 
+                        "category": "First-time buyer"
+                    }
+                },
+                {
+                    "id": "opt_remortgage", 
+                    "component": "ListItem", 
+                    "text": "Remortgage", 
+                    "data": {
+                        "number": "02",
+                        "subtext": "Switching your deal",
+                        "rightText": "SWITCH",
+                        "url": f"data:image/png;base64,{remortgage_icon}",
+                        "action": "select_category", 
+                        "category": "Remortgage"
+                    }
+                },
+                {
+                    "id": "opt_btl", 
+                    "component": "ListItem", 
+                    "text": "Buy-to-let", 
+                    "data": {
+                        "number": "03",
+                        "subtext": "Investment property",
+                        "rightText": "INVEST",
+                        "url": f"data:image/png;base64,{btl_icon}",
+                        "action": "select_category", 
+                        "category": "Buy-to-let"
+                    }
+                },
+                {
+                    "id": "opt_moving", 
+                    "component": "ListItem", 
+                    "text": "Moving Home", 
+                    "data": {
+                        "number": "04",
+                        "subtext": "New house, new mortgage",
+                        "rightText": "RELOCATE",
+                        "url": f"data:image/png;base64,{moving_icon}",
+                        "action": "select_category", 
+                        "category": "Moving home"
+                    }
+                },
+                {
+                    "id": "guidance",
+                    "component": "Text",
+                    "text": "Select a mortgage type to get started",
+                    "variant": "caption"
+                }
             ]
         else:
             components = [
@@ -731,40 +778,95 @@ def render_missing_inputs(state: AgentState):
     # Determine which field the agent is currently asking about (first missing one)
     next_missing = missing[0] if missing else None
 
+    # Determine if we should show the details list yet
+    show_details = intent.get("existingCustomer") is not None
+    is_customer = intent.get("existingCustomer") is True
+
+    category_label = f"[{category}]" if category else ""
+
     pv_focus = next_missing in ("property value",)
     lb_focus = next_missing in ("loan balance", "mortgage amount")
     fy_focus = next_missing in ("fixed term (years)",)
     addr_focus = next_missing in ("address",)
     income_focus = next_missing in ("annual income",)
 
-    category_label = f"[{category}]" if category else ""
+    if not show_details:
+        components = [
+            {"id": "root", "component": "Column", "children": ["journey", "header", "guidance"]},
+            {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 1}},
+            {"id": "header", "component": "Text", "text": f"Let’s build your quote {category_label}", "variant": "h2"},
+            {"id": "guidance", "component": "Text", "text": "Please confirm if you already bank with us so we can personalize your journey.", "variant": "caption"}
+        ]
+    else:
+        # Re-using icons or using placeholders for now
+        # Ideally we'd have specific icons for these
+        try:
+            with open(os.path.join(_ASSETS_DIR, "ftb_b64.txt"), "r") as f: icon_b64 = f.read().strip()
+        except:
+            icon_b64 = ""
 
-    components = [
-        {"id": "root", "component": "Column", "children": ["journey", "header", "details_col"]},
-        {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 1}},
-        {"id": "header", "component": "Text", "text": f"Let\u2019s build your quote {category_label}", "variant": "h2"},
-        {"id": "details_col", "component": "Column", "children": ["row_addr", "row_pv", "row_income", "row_lb", "row_fy"]},
-
-        {"id": "row_addr", "component": "Row", "children": ["lbl_addr", "val_addr"]},
-        {"id": "lbl_addr", "component": "Text", "text": "Property Address:", "variant": "h3", "focus": addr_focus},
-        {"id": "val_addr", "component": "Text", "text": addr_text, "variant": "body", "focus": addr_focus},
-
-        {"id": "row_pv", "component": "Row", "children": ["lbl_pv", "val_pv"]},
-        {"id": "lbl_pv", "component": "Text", "text": "Property Value:", "variant": "h3", "focus": pv_focus},
-        {"id": "val_pv", "component": "Text", "text": pv_text, "variant": "body", "focus": pv_focus},
-
-        {"id": "row_income", "component": "Row", "children": ["lbl_income", "val_income"]},
-        {"id": "lbl_income", "component": "Text", "text": "Annual Income" + (" (Joint):" if intent.get("isJoint") else ":"), "variant": "h3", "focus": income_focus},
-        {"id": "val_income", "component": "Text", "text": income_text, "variant": "body", "focus": income_focus},
-
-        {"id": "row_lb", "component": "Row", "children": ["lbl_lb", "val_lb"]},
-        {"id": "lbl_lb", "component": "Text", "text": "Loan Balance:" if category == "Remortgage" else "Mortgage Amount:", "variant": "h3", "focus": lb_focus},
-        {"id": "val_lb", "component": "Text", "text": lb_text, "variant": "body", "focus": lb_focus},
-
-        {"id": "row_fy", "component": "Row", "children": ["lbl_fy", "val_fy"]},
-        {"id": "lbl_fy", "component": "Text", "text": "Fixed Term:", "variant": "h3", "focus": fy_focus},
-        {"id": "val_fy", "component": "Text", "text": fy_text, "variant": "body", "focus": fy_focus},
-    ]
+        components = [
+            {"id": "root", "component": "Column", "children": ["journey", "header", "details_col"]},
+            {"id": "journey", "component": "Timeline", "data": {"steps": ["Intent", "Property", "Quotes", "Summary"], "current": 1}},
+            {"id": "header", "component": "Text", "text": f"Mortgage Details {category_label}", "variant": "h2"},
+            {"id": "details_col", "component": "Column", "children": ["item_addr", "item_pv", "item_income", "item_lb", "item_fy"]},
+            
+            {
+                "id": "item_addr", 
+                "component": "ListItem", 
+                "text": addr_text or "Pending...", 
+                "focus": addr_focus,
+                "data": {
+                    "subtext": "Property Address",
+                    "rightText": "📍",
+                    "url": f"data:image/png;base64,{icon_b64}" if addr_text else None
+                }
+            },
+            {
+                "id": "item_pv", 
+                "component": "ListItem", 
+                "text": pv_text or "Pending...", 
+                "focus": pv_focus,
+                "data": {
+                    "subtext": "Property Value",
+                    "rightText": "🏠",
+                    "url": f"data:image/png;base64,{icon_b64}" if pv_text else None
+                }
+            },
+            {
+                "id": "item_income", 
+                "component": "ListItem", 
+                "text": income_text or "Pending...", 
+                "focus": income_focus,
+                "data": {
+                    "subtext": "Annual Income" + (" (Joint)" if intent.get("isJoint") else ""),
+                    "rightText": "💰",
+                    "url": f"data:image/png;base64,{icon_b64}" if income_text else None
+                }
+            },
+            {
+                "id": "item_lb", 
+                "component": "ListItem", 
+                "text": lb_text or "Pending...", 
+                "focus": lb_focus,
+                "data": {
+                    "subtext": "Loan Balance" if category == "Remortgage" else "Mortgage Amount",
+                    "rightText": "🏦",
+                    "url": f"data:image/png;base64,{icon_b64}" if lb_text else None
+                }
+            },
+            {
+                "id": "item_fy", 
+                "component": "ListItem", 
+                "text": fy_text or "Pending...", 
+                "focus": fy_focus,
+                "data": {
+                    "subtext": "Fixed Term",
+                    "rightText": "⏳",
+                    "url": f"data:image/png;base64,{icon_b64}" if fy_text else None
+                }
+            }
+        ]
 
     lat = intent.get("lat")
     lng = intent.get("lng")
@@ -830,6 +932,7 @@ def render_missing_inputs(state: AgentState):
 
     payload = {
         "version": "v0.9",
+        "isExistingCustomer": is_customer,
         "updateComponents": {
             "surfaceId": "main",
             "components": components
