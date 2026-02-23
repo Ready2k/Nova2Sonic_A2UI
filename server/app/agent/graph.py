@@ -44,25 +44,39 @@ _SPOKEN_DIGITS = {
     "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
 }
 
+_PHONETIC_ALPHABET = {
+    "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D", "echo": "E",
+    "foxtrot": "F", "golf": "G", "hotel": "H", "india": "I", "juliet": "J",
+    "kilo": "K", "lima": "L", "mike": "M", "november": "N", "oscar": "O",
+    "papa": "P", "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T",
+    "uniform": "U", "victor": "V", "whiskey": "W", "whisky": "W", "xray": "X",
+    "yankee": "Y", "zulu": "Z"
+}
+
+_IGNORED_WORDS = {"for", "is", "at", "the", "and", "it", "my", "of"}
+
 def _normalize_spoken_to_postcode(text: str) -> str | None:
     """
-    Try to extract a UK postcode from STT spoken-letter output.
-    e.g. "s. t. three five t. w." → "ST3 5TW"
-         "e c one a one b b"      → "EC1A 1BB"
-    Returns the normalized postcode string, or None if no valid pattern found.
+    Try to extract a UK postcode from STT spoken-letter/phonetic output.
+    e.g. "s. for sierra t. for tango three five t. for tango w. for whisky" → "ST3 5TW"
     """
-    # Remove dots/hyphens, collapse whitespace
-    cleaned = re.sub(r'[.\-]', ' ', text).strip()
-    # Convert number-words to digits, keep single letters, uppercase everything
+    # Remove dots/hyphens, handle cases like 'tangothree' by splitting digits from letters
+    cleaned = re.sub(r'([a-z])([0-9])', r'\1 \2', text.lower())
+    cleaned = re.sub(r'([0-9])([a-z])', r'\1 \2', cleaned)
+    cleaned = re.sub(r'[.\-]', ' ', cleaned).strip()
+    
     tokens = cleaned.split()
     parts = []
     for tok in tokens:
-        lower = tok.lower()
-        if lower in _SPOKEN_DIGITS:
-            parts.append(_SPOKEN_DIGITS[lower])
-        elif len(tok) <= 3:          # single/double letters or digits
+        if tok in _SPOKEN_DIGITS:
+            parts.append(_SPOKEN_DIGITS[tok])
+        elif tok in _PHONETIC_ALPHABET:
+            parts.append(_PHONETIC_ALPHABET[tok])
+        elif tok in _IGNORED_WORDS:
+            continue
+        elif len(tok) == 1: # Single letter or digit
             parts.append(tok.upper())
-        # discard longer filler words like "the", "and", etc.
+            
     joined = ''.join(parts)
     # UK postcode regex: outward (1-2 letters + 1-2 digits + optional letter) + inward (1 digit + 2 letters)
     match = re.search(r'([A-Z]{1,2}[0-9]{1,2}[A-Z]?)([0-9][A-Z]{2})', joined)
@@ -300,13 +314,15 @@ def interpret_intent(state: AgentState):
                 f"Current known intent: {intent}\n"
                 f"User just said: '{transcript}'\n\n"
                 "Rules:\n"
-                "- Interpret short answers (yes/no/yeah/nope) using the context above.\n"
-                "- For money amounts, extract the number (e.g. '400k' = 400000, '400 thousand' = 400000).\n"
-                "- For annual income, extract the yearly gross salary figure. If it's a joint application, please SUM both incomes into a single field.\n"
-                "- If the user mentions they are applying with a partner, set 'isJoint' to true.\n"
-                "- If the user shares life details (new baby, relocation, retirement), capture a brief summary in the 'notes' field.\n"
-                "- Do NOT change fields that already have values unless the user explicitly corrects them.\n"
-                "- If the user is just being conversational ('okay', 'go for it'), do NOT change any fields.\n"
+                "- ONLY extract fields that are explicitly mentioned or clearly answered in the LATEST USER MESSAGE.\n"
+                "- IMPORTANT: Do NOT guess, assume, or provide default values for fields like propertyValue, annualIncome, or loanBalance if not stated.\n"
+                "- If the user says 'Number One [Street]' or 'First House', do NOT interpret 'one' as fixYears or propertyValue; it is part of the address.\n"
+                "- Interpret short answers (yes/no/yeah/nope) using the 'Context' provided above.\n"
+                "- For money, '400k' = 400000. If joint application, SUM the incomes provided.\n"
+                "- If the user mentions applying with a partner, set 'isJoint' to true.\n"
+                "- If they share life feelings (excited, nervous), capture it in 'notes'.\n"
+                "- If they are just being conversational ('okay', 'thanks'), leave all fields as they were.\n"
+                "- DO NOT change any field that already has a value unless the user is explicitly CORRECTING it.\n"
             )
             lc_messages.append(HumanMessage(content=current_prompt))
 
@@ -334,47 +350,45 @@ def interpret_intent(state: AgentState):
             elif any(w in t for w in ["no", "nope", "not yet", "haven't"]):
                 new_intent["propertySeen"] = False
 
-    # ── Address validation ────────────────────────────────────────────────────
+    # ── Address/Postcode Extraction & Validation ─────────────────────────────
     new_address = new_intent.get("address")
     old_address = intent.get("address")
+    
+    # Try to recover a phonetic postcode from the transcript
+    spoken_pc = _normalize_spoken_to_postcode(transcript)
+    
+    # If we have a spoken postcode, try to use it to enrich or recover the address
+    if spoken_pc:
+        logger.info(f"Phonetic postcode detected: '{spoken_pc}'")
+        # Scenario A: User is giving a new address but also spelling the postcode
+        if new_address and spoken_pc.replace(" ","").lower() not in new_address.replace(" ","").lower():
+            new_address = f"{new_address}, {spoken_pc}"
+            new_intent["address"] = new_address
+        # Scenario B: Address validation failed previously, user just said the postcode
+        elif not new_address and address_validation_failed and last_attempted_address:
+            new_address = f"{last_attempted_address}, {spoken_pc}"
+            new_intent["address"] = new_address
 
-    # When address validation previously failed, the agent asked for a postcode.
-    # The user may now say just the postcode (e.g. "ST3 5TW" → STT transcribes as
-    # "s. t. three five t. w."). Detect and normalize it, then combine with the
-    # last known address for a better geocoding attempt.
-    if address_validation_failed and last_attempted_address:
-        spoken_pc = _normalize_spoken_to_postcode(transcript)
-        if spoken_pc:
-            logger.info(f"Detected spoken postcode in transcript: '{transcript}' → '{spoken_pc}'")
-            combined = f"{last_attempted_address}, {spoken_pc}"
-            success, vlat, vlng = _validate_address_uk(combined)
-            if not success:
-                # Try the postcode alone — Nominatim can resolve UK postcodes directly
-                success, vlat, vlng = _validate_address_uk(spoken_pc)
-            if success:
-                resolved_address = combined if new_address is None else new_address
-                new_intent["address"] = resolved_address
-                new_intent["lat"] = vlat
-                new_intent["lng"] = vlng
-                address_validation_failed = False
-                last_attempted_address = None
-                logger.info(f"Address resolved via postcode normalization: '{resolved_address}' -> ({vlat}, {vlng})")
-            else:
-                logger.warning(f"Postcode '{spoken_pc}' still not found — keeping validation_failed state")
-
-    if not address_validation_failed and new_address and new_address != old_address:
-        # A new address was extracted — validate it against UK geocoding
+    # Validate the current address candidate if it changed
+    if new_address and new_address != old_address:
         success, vlat, vlng = _validate_address_uk(new_address)
+        if not success and spoken_pc:
+            # Maybe the combined address failed, but the postcode alone might work
+            success, vlat, vlng = _validate_address_uk(spoken_pc)
+            if success:
+                new_address = f"{new_address.split(',')[0]}, {spoken_pc}" if ',' in new_address else spoken_pc
+                new_intent["address"] = new_address
+
         if success:
             new_intent["lat"] = vlat
             new_intent["lng"] = vlng
             address_validation_failed = False
             last_attempted_address = None
-            logger.info(f"Address validated OK: '{new_address}' -> ({vlat}, {vlng})")
+            logger.info(f"Address validated: '{new_address}' -> ({vlat}, {vlng})")
         else:
             logger.warning(f"Address validation failed: '{new_address}'")
             last_attempted_address = new_address
-            new_intent.pop("address", None)   # keep it missing so the agent re-asks
+            new_intent.pop("address", None) # Keep it missing so agent re-asks
             new_intent.pop("lat", None)
             new_intent.pop("lng", None)
             address_validation_failed = True
@@ -1376,12 +1390,32 @@ def confirm_application(state: AgentState):
 
 def _all_required_fields_present(intent: dict) -> bool:
     """True when all fields needed to call mortgage tools are known."""
-    return (
+    category = intent.get("category")
+    if not category:
+        return False
+    
+    # Core numeric fields required for the calculator
+    base_calc_ready = (
         intent.get("propertyValue") is not None
         and intent.get("annualIncome") is not None
         and intent.get("loanBalance") is not None
         and intent.get("fixYears") is not None
     )
+    if not base_calc_ready:
+        return False
+
+    # Journey context fields
+    if intent.get("existingCustomer") is None:
+        return False
+    
+    if category != "Remortgage":
+        if intent.get("propertySeen") is None:
+            return False
+        # If they've seen a property, we really should have the address before showing specific product quotes
+        if intent.get("propertySeen") and not intent.get("address"):
+            return False
+            
+    return True
 
 
 def root_router(state: AgentState):
