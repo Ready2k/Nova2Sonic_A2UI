@@ -20,6 +20,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import dotenv from 'dotenv';
 import * as path from 'path';
+import { createHash } from 'crypto';
 
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
@@ -299,9 +300,9 @@ async function main() {
         let currentContentType = null;
         let currentGenerationStage = 'FINAL';
         let inAssistantAudioBlock = false;
-        let skipCurrentBlock = false;
-        let hasEmittedFinalBlock = false;
         let speculativeChunks = []; // Buffer for current speculative block
+        let finalChunks = []; // Buffer for current FINAL block, emitted on block end
+        let lastFinalBlockDigest = null; // Dedupe exact duplicate FINAL blocks
         let speculativeFallbackChunks = []; // Prompt-level fallback if stream has no FINAL audio
 
         for await (const event of response.body) {
@@ -319,13 +320,11 @@ async function main() {
                     // Missing stage metadata is common; default to FINAL so audio is not dropped.
                     currentGenerationStage = stage || 'FINAL';
 
-                    // Nova can emit a second FINAL pass with duplicate audio. Keep only the first FINAL pass.
-                    skipCurrentBlock = hasEmittedFinalBlock && currentGenerationStage === 'FINAL';
-
                     inAssistantAudioBlock = true;
                     speculativeChunks = []; // Reset buffer for new block
+                    finalChunks = []; // Reset FINAL buffer for new block
                     chunksEmittedInBlock = 0; // Reset count for new block
-                    console.error(`[TTS DEBUG] ${nowIso()} Enter ASSISTANT AUDIO block stage=${currentGenerationStage} skip=${skipCurrentBlock}`);
+                    console.error(`[TTS DEBUG] ${nowIso()} Enter ASSISTANT AUDIO block stage=${currentGenerationStage}`);
                 }
             }
 
@@ -334,12 +333,8 @@ async function main() {
 
                 if (inAssistantAudioBlock) {
                     if (currentGenerationStage === 'FINAL') {
-                        if (skipCurrentBlock) {
-                            continue;
-                        }
                         chunksEmittedInBlock++;
-                        chunksEmittedTotal++;
-                        console.log(`AUDIO_CHUNK:${audioData}`);
+                        finalChunks.push(audioData);
                     } else if (currentGenerationStage === 'SPECULATIVE') {
                         // Keep speculative audio only as prompt-level fallback.
                         // We avoid emitting speculative blocks inline because FINAL blocks may follow,
@@ -355,13 +350,29 @@ async function main() {
                     if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
                         speculativeFallbackChunks.push(...speculativeChunks);
                     }
-                    if (!skipCurrentBlock && currentGenerationStage === 'FINAL' && chunksEmittedInBlock > 0) {
-                        hasEmittedFinalBlock = true;
+                    if (currentGenerationStage === 'FINAL' && finalChunks.length > 0) {
+                        const blockHasher = createHash('sha1');
+                        for (const chunk of finalChunks) {
+                            blockHasher.update(chunk);
+                            blockHasher.update('|');
+                        }
+                        const digest = blockHasher.digest('hex');
+
+                        if (digest === lastFinalBlockDigest) {
+                            console.error(`[TTS DEBUG] ${nowIso()} Skipping duplicate FINAL block chunks=${finalChunks.length}`);
+                        } else {
+                            for (const chunk of finalChunks) {
+                                chunksEmittedTotal++;
+                                console.log(`AUDIO_CHUNK:${chunk}`);
+                            }
+                            lastFinalBlockDigest = digest;
+                        }
                     }
-                    console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage} skip=${skipCurrentBlock}`);
+
+                    console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage}`);
                     inAssistantAudioBlock = false;
-                    skipCurrentBlock = false;
                     speculativeChunks = [];
+                    finalChunks = [];
                 }
                 currentRole = null;
                 currentContentType = null;
