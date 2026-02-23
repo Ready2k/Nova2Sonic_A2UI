@@ -26,6 +26,8 @@ class AgentState(TypedDict):
     outbox: Annotated[List[Dict[str, Any]], append_reducer]
     existing_customer: Optional[bool]
     property_seen: Optional[bool]
+    trouble_count: int
+    show_support: bool
 
 def ingest_input(state: AgentState):
     logger.info(f"NODE: ingest_input - transcript='{state.get('transcript')}'")
@@ -48,9 +50,6 @@ def interpret_intent(state: AgentState):
     logger.info(f"NODE: interpret_intent - input='{transcript}'")
     intent = state.get("intent", {}) or {}
     messages = state.get("messages", [])
-    
-    if not transcript:
-        return {}
 
     # Determine what question was last asked (so we can interpret short answers like "yes" correctly)
     last_question_context = ""
@@ -100,35 +99,62 @@ def interpret_intent(state: AgentState):
             idict = result.model_dump(exclude_none=True)
             
             new_intent = {**intent, **idict}
-            
-            return {
-                "intent": new_intent,
-                "existing_customer": new_intent.get("existingCustomer"),
-                "property_seen": new_intent.get("propertySeen")
-            }
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print(f"Fallback to mock parsing due to Bedrock error: {e}")
+            logger.error(f"Fallback to mock parsing due to Bedrock error: {e}")
+            new_intent = dict(intent)
+    else:
+        # Keyword fallback (no AWS)
+        new_intent = dict(intent)
+        t = transcript.lower()
+        if intent.get("existingCustomer") is None:
+            if any(w in t for w in ["yes", "yeah", "yep", "do", "i am", "i do", "it is"]):
+                new_intent["existingCustomer"] = True
+            elif any(w in t for w in ["no", "nope", "don't", "dont", "not"]):
+                new_intent["existingCustomer"] = False
+        elif intent.get("propertySeen") is None:
+            if any(w in t for w in ["yes", "yeah", "found", "seen", "have"]):
+                new_intent["propertySeen"] = True
+            elif any(w in t for w in ["no", "nope", "not yet", "haven't"]):
+                new_intent["propertySeen"] = False
 
-    # Keyword fallback (no AWS)
-    new_intent = dict(intent)
-    t = transcript.lower()
-    if intent.get("existingCustomer") is None:
-        if any(w in t for w in ["yes", "yeah", "yep", "do", "i am", "i do", "it is"]):
-            new_intent["existingCustomer"] = True
-        elif any(w in t for w in ["no", "nope", "don't", "dont", "not"]):
-            new_intent["existingCustomer"] = False
-    elif intent.get("propertySeen") is None:
-        if any(w in t for w in ["yes", "yeah", "found", "seen", "have"]):
-            new_intent["propertySeen"] = True
-        elif any(w in t for w in ["no", "nope", "not yet", "haven't"]):
-            new_intent["propertySeen"] = False
+    new_trouble_count = state.get("trouble_count", 0)
+    
+    if not transcript:
+        # No transcript? User might be having issues with the mic or just didn't speak.
+        new_trouble_count += 1
+    else:
+        # Critical keys that, if changed, mean the user IS following instructions
+        RESET_KEYS = {"propertyValue", "loanBalance", "fixYears", "existingCustomer", "propertySeen", "address", "category", "termYears"}
+        
+        intent_changed = False
+        for k in RESET_KEYS:
+            if new_intent.get(k) != intent.get(k):
+                intent_changed = True
+                break
+        
+        # Explicitly detect phrases indicating struggle
+        struggle_keywords = ["struggling", "help", "don't know", "dont know", "not working", "stuck", "human", "specialist", "agent", "person"]
+        is_struggling = any(kw in transcript.lower() for kw in struggle_keywords)
+        
+        if intent_changed and not is_struggling:
+            # User provided useful info! Reset trouble
+            new_trouble_count = 0
+        else:
+            # Either no info provided, or they explicitly said they are struggling
+            increment = 2 if is_struggling else 1
+            new_trouble_count += increment
+
+    show_support = new_trouble_count >= 2
+    logger.info(f"Trouble State: count={new_trouble_count}, show_support={show_support}, transcript='{transcript}'")
 
     return {
         "intent": new_intent,
         "existing_customer": new_intent.get("existingCustomer"),
-        "property_seen": new_intent.get("propertySeen")
+        "property_seen": new_intent.get("propertySeen"),
+        "trouble_count": new_trouble_count,
+        "show_support": show_support
     }
 
 def render_missing_inputs(state: AgentState):

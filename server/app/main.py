@@ -48,7 +48,9 @@ def create_initial_state() -> AgentState:
         "pendingAction": None,
         "outbox": [],
         "existing_customer": None,
-        "property_seen": None
+        "property_seen": None,
+        "trouble_count": 0,
+        "show_support": False
     }
 
 async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload: dict = None):
@@ -132,7 +134,10 @@ async def process_outbox(websocket: WebSocket, sid: str):
         for event in outbox:
             if event["type"] != "server.voice.say":
                 logger.info(f"Emitting from outbox: {event['type']}")
-                await send_msg(websocket, sid, event["type"], event.get("payload"))
+                payload = event.get("payload", {}) or {}
+                if event["type"] == "server.a2ui.patch":
+                    payload["showSupport"] = state.get("show_support", False)
+                await send_msg(websocket, sid, event["type"], payload)
 
                 if event["type"] == "server.transcript.final":
                     payload = event.get("payload") or {}
@@ -280,15 +285,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         session_data["assist_buffer"] = []
 
                     full_transcript = "".join(session_data["user_transcripts"]).strip()
-                    if not full_transcript:
-                        return
+                    # Continue even if empty to detect silence/trouble
                     session_data["user_transcripts"] = []
                     
                     await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
                     
                     current_state["transcript"] = full_transcript
                     current_state["mode"] = "voice"
-                    current_state["messages"].append({"role": "user", "text": full_transcript})
+                    if full_transcript:
+                        current_state["messages"].append({"role": "user", "text": full_transcript})
                     
                     await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
                     

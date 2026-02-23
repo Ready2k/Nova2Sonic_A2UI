@@ -19,6 +19,7 @@ export interface A2UIUpdateComponents {
 
 export interface A2UIPayload {
     version: string;
+    showSupport?: boolean;
     updateComponents: A2UIUpdateComponents;
 }
 
