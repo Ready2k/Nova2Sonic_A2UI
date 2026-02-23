@@ -18,6 +18,8 @@ from .nova_sonic import NovaSonicSession
 logging.basicConfig(level=logging.INFO)
 
 
+
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Barclays Mortgage Assistant")
@@ -65,6 +67,14 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=os.path.dirname(os.path.dirname(__file__))
         )
+        async def log_stderr(stderr):
+            while True:
+                line = await stderr.readline()
+                if not line: break
+                logger.debug(f"[TTS DEBUG (stderr)] {line.decode().strip()}")
+
+        stderr_task = asyncio.create_task(log_stderr(proc.stderr))
+
         chunk_count = 0
         while True:
             line = await proc.stdout.readline()
@@ -77,7 +87,13 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
                 chunk_data = decoded.split("AUDIO_CHUNK:")[1]
                 logger.info(f"[TTS] Sending audio chunk {chunk_count}, size: {len(chunk_data)}")
                 await send_msg(websocket, session_id, "server.voice.audio", {"data": chunk_data})
+        
+        # Signal stop to client immediately once stdout ends
+        await send_msg(websocket, session_id, "server.voice.stop", {"sid": session_id})
+        
         await proc.wait()
+        await stderr_task
+
         logger.info(f"[TTS] Process completed, sent {chunk_count} total chunks")
     except Exception as e:
         logger.error(f"TTS fallback failed: {e}")

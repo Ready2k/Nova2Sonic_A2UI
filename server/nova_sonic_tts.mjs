@@ -207,7 +207,6 @@ async function main() {
         };
 
         // Silence audio block — required by Nova Sonic to signal end-of-turn.
-        // interactive: false to avoid triggering additional speculative generation.
         const audioContentName = `audio-${Date.now()}`;
         yield {
             chunk: {
@@ -263,7 +262,7 @@ async function main() {
             }
         };
 
-        // Wait until we decide to finish from output stream handling
+        // Wait until Bedrock emits promptEnd or error
         while (!canFinish) {
             await new Promise(resolve => setTimeout(resolve, 50));
         }
@@ -300,10 +299,11 @@ async function main() {
         let currentContentType = null;
         let currentGenerationStage = 'FINAL';
         let inAssistantAudioBlock = false;
-        let speculativeChunks = []; // Buffer for current speculative block
-        let finalChunks = []; // Buffer for current FINAL block, emitted on block end
-        let lastFinalBlockDigest = null; // Dedupe exact duplicate FINAL blocks
-        let speculativeFallbackChunks = []; // Prompt-level fallback if stream has no FINAL audio
+        let textEmittedSet = new Set();
+        let currentBlockText = '';
+        let speculativeChunks = [];
+        let finalChunks = [];
+        let speculativeFallbackChunks = [];
 
         for await (const event of response.body) {
             if (!event.chunk?.bytes) continue;
@@ -317,14 +317,20 @@ async function main() {
 
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO') {
                     const stage = extractGenerationStage(eventData.contentStart);
-                    // Missing stage metadata is common; default to FINAL so audio is not dropped.
                     currentGenerationStage = stage || 'FINAL';
 
                     inAssistantAudioBlock = true;
-                    speculativeChunks = []; // Reset buffer for new block
-                    finalChunks = []; // Reset FINAL buffer for new block
-                    chunksEmittedInBlock = 0; // Reset count for new block
-                    console.error(`[TTS DEBUG] ${nowIso()} Enter ASSISTANT AUDIO block stage=${currentGenerationStage}`);
+                    speculativeChunks = [];
+                    finalChunks = [];
+                    chunksEmittedInBlock = 0;
+                }
+            }
+
+            if (eventData.textOutput) {
+                const text = eventData.textOutput.content || '';
+                const role = eventData.textOutput.role;
+                if (role === 'ASSISTANT') {
+                    currentBlockText += text;
                 }
             }
 
@@ -336,9 +342,6 @@ async function main() {
                         chunksEmittedInBlock++;
                         finalChunks.push(audioData);
                     } else if (currentGenerationStage === 'SPECULATIVE') {
-                        // Keep speculative audio only as prompt-level fallback.
-                        // We avoid emitting speculative blocks inline because FINAL blocks may follow,
-                        // which would cause duplicate playback.
                         speculativeChunks.push(audioData);
                     }
                 }
@@ -346,79 +349,60 @@ async function main() {
 
             if (eventData.contentEnd) {
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO' && inAssistantAudioBlock) {
-                    // Do not emit speculative chunks inline. Accumulate as fallback only.
+                    const normalizedText = currentBlockText.trim();
+
                     if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
                         speculativeFallbackChunks.push(...speculativeChunks);
                     }
-                    if (currentGenerationStage === 'FINAL' && finalChunks.length > 0) {
-                        const blockHasher = createHash('sha1');
-                        for (const chunk of finalChunks) {
-                            blockHasher.update(chunk);
-                            blockHasher.update('|');
-                        }
-                        const digest = blockHasher.digest('hex');
 
-                        if (digest === lastFinalBlockDigest) {
-                            console.error(`[TTS DEBUG] ${nowIso()} Skipping duplicate FINAL block chunks=${finalChunks.length}`);
+                    if (currentGenerationStage === 'FINAL' && finalChunks.length > 0) {
+                        if (normalizedText && textEmittedSet.has(normalizedText)) {
+                            // console.error(`[TTS DEBUG] Skipping duplicate FINAL block for text: "${normalizedText}"`);
                         } else {
+                            if (normalizedText) textEmittedSet.add(normalizedText);
                             for (const chunk of finalChunks) {
                                 chunksEmittedTotal++;
                                 console.log(`AUDIO_CHUNK:${chunk}`);
                             }
-                            lastFinalBlockDigest = digest;
                         }
                     }
 
-                    console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage}`);
                     inAssistantAudioBlock = false;
                     speculativeChunks = [];
                     finalChunks = [];
+                    currentBlockText = ''; // Reset for next block
                 }
+
                 currentRole = null;
                 currentContentType = null;
             }
 
             if (eventData.promptEnd) {
-                // Prompt end can arrive before all buffered audioOutput events are drained.
-                // Do not break early; keep consuming the stream until it naturally ends.
-                console.error(`[TTS DEBUG] ${nowIso()} Prompt ended. Continuing to drain stream. Total emitted chunks=${chunksEmittedTotal}`);
                 finishSignal();
-                continue;
+                break;
             }
 
-            if (eventData.internalServerException) {
-                console.error('InternalServerException:', eventData.internalServerException);
-                process.exit(1);
-            }
-
-            if (eventData.throttlingException) {
-                console.error('ThrottlingException:', eventData.throttlingException);
-                process.exit(1);
-            }
-
-            if (eventData.validationException) {
-                console.error('ValidationException:', eventData.validationException);
-                process.exit(1);
+            if (eventData.internalServerException || eventData.throttlingException || eventData.validationException) {
+                finishSignal();
+                break;
             }
         }
 
         if (chunksEmittedTotal === 0 && speculativeFallbackChunks.length > 0) {
-            console.error(`[TTS DEBUG] ${nowIso()} FINAL audio missing; emitting ${speculativeFallbackChunks.length} speculative fallback chunks`);
             for (const chunk of speculativeFallbackChunks) {
                 chunksEmittedTotal++;
                 console.log(`AUDIO_CHUNK:${chunk}`);
             }
         }
 
-        if (!canFinish) {
-            console.error(`[TTS DEBUG] ${nowIso()} Stream ended unexpectedly. Emitted chunks=${chunksEmittedTotal}`);
-            finishSignal();
-        }
+        finishSignal();
+        process.exit(0);
     } catch (e) {
-        console.error('Error from Bedrock:', e);
+        finishSignal();
         process.exit(1);
     }
 }
+
 
 main().catch(err => {
     console.error('Fatal:', err);
