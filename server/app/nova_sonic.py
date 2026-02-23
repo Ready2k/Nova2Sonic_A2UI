@@ -20,101 +20,108 @@ class NovaSonicSession:
 
         self.is_active       = False
         self._is_processing  = False
-        self.audio_buffer    = []   # raw base64 chunks from client
+        self.proc            = None
+        self.reader_task     = None
 
     async def start_session(self, system_prompt: str = None):
         logger.info("Nova Sonic: session started")
-        self.audio_buffer   = []
         self.is_active      = True
         self._is_processing = False
 
     async def start_audio_input(self):
-        logger.info("Nova Sonic: ready for audio")
-        self.audio_buffer = []
+        if not self.is_active:
+            await self.start_session()
+        
+        logger.info("Nova Sonic: starting real-time STT process")
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                "node", _STT_SCRIPT,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self.reader_task = asyncio.create_task(self._read_stdout())
+        except Exception as e:
+            logger.error(f"Nova Sonic: failed to start STT process: {e}")
+            self.is_active = False
+
+    async def _read_stdout(self):
+        """Background task to read transcripts from the Node process."""
+        try:
+            while self.proc and self.proc.stdout:
+                line = await self.proc.stdout.readline()
+                if not line:
+                    break
+                
+                decoded = line.decode().strip()
+                if decoded.startswith("TRANSCRIPT_PARTIAL:"):
+                    partial = decoded[len("TRANSCRIPT_PARTIAL:"):].strip()
+                    if partial and self.on_text_chunk:
+                        # We treat partials as is_user=True but maybe we need a separate flag?
+                        # For now, let's just pass it through.
+                        res = self.on_text_chunk(partial, is_user=True)
+                        if asyncio.iscoroutine(res): await res
+                elif decoded.startswith("TRANSCRIPT:"):
+                    # We already have the fragments in user_transcripts via PARTIAL
+                    # and handle_finished will join them.
+                    pass
+            
+            # Read stderr for debug
+            if self.proc and self.proc.stderr:
+                err_data = await self.proc.stderr.read()
+                if err_data:
+                    for l in err_data.decode().splitlines():
+                        logger.debug(f"STT: {l}")
+        except Exception as e:
+            logger.error(f"Nova Sonic: error in stdout reader: {e}")
 
     async def send_audio_chunk(self, base64_audio: str):
-        if not self.is_active:
+        if not self.is_active or not self.proc or not self.proc.stdin:
             return
-        self.audio_buffer.append(base64_audio)
+        try:
+            # We must send base64 per chunk as the script uses readline
+            self.proc.stdin.write(f"{base64_audio}\n".encode())
+            await self.proc.stdin.drain()
+        except Exception as e:
+            logger.error(f"Nova Sonic: error writing to STT stdin: {e}")
 
     async def end_audio_input(self):
         if not self.is_active or self._is_processing:
             return
 
         self._is_processing = True
-        chunk_count = len(self.audio_buffer)
-        logger.info(f"Nova Sonic: ending audio input ({chunk_count} chunks)")
+        logger.info("Nova Sonic: ending audio input")
 
-        # --- Fix base64 concatenation ---
-        # Each client chunk is independently base64-encoded.  Naively joining
-        # the strings produces invalid base64 because of internal padding chars.
-        # Decode each chunk to bytes, concatenate, then re-encode as one block.
-        audio_bytes = b""
-        for chunk in self.audio_buffer:
+        if self.proc and self.proc.stdin:
             try:
-                audio_bytes += base64.b64decode(chunk)
-            except Exception as e:
-                logger.warning(f"Nova Sonic: skipping malformed audio chunk: {e}")
-        self.audio_buffer = []
+                self.proc.stdin.close()
+                await self.proc.stdin.wait_closed()
+            except: pass
 
-        if not audio_bytes:
-            logger.warning("Nova Sonic: no valid audio data — skipping STT")
-            if self.on_finished:
-                await self.on_finished()
-            self._is_processing = False
-            self.is_active = False
-            return
+        if self.reader_task:
+            await self.reader_task
 
-        full_audio_b64 = base64.b64encode(audio_bytes).decode()
-        logger.info(f"Nova Sonic: total audio {len(audio_bytes)} bytes → STT script")
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "node", _STT_SCRIPT,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
+        if self.proc:
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(input=full_audio_b64.encode()),
-                    timeout=30.0
-                )
-            except asyncio.TimeoutError:
-                logger.error("Nova Sonic: STT script timed out after 30s")
-                proc.kill()
-                await proc.wait()
-                stdout, stderr = b"", b""
+                await self.proc.wait()
+            except: pass
+            self.proc = None
 
-            if stderr:
-                # STT debug lines go to stderr — log them at DEBUG level
-                for line in stderr.decode().splitlines():
-                    logger.debug(f"STT: {line}")
-
-            transcript = ""
-            for line in stdout.decode().splitlines():
-                if line.startswith("TRANSCRIPT:"):
-                    transcript = line[len("TRANSCRIPT:"):].strip()
-                    break
-
-            logger.info(f"Nova Sonic: transcript='{transcript}'")
-
-            if transcript and self.on_text_chunk:
-                result = self.on_text_chunk(transcript, True)
-                if asyncio.iscoroutine(result):
-                    await result
-
-        except Exception as e:
-            logger.error(f"Nova Sonic: STT error: {e}")
-            traceback.print_exc()
-        finally:
-            if self.on_finished:
-                await self.on_finished()
-            self._is_processing = False
-            self.is_active = False
+        if self.on_finished:
+            await self.on_finished()
+        
+        self._is_processing = False
+        self.is_active = False
 
     async def end_session(self):
         self.is_active      = False
         self._is_processing = False
-        self.audio_buffer   = []
+        if self.proc:
+            try:
+                self.proc.terminate()
+                await self.proc.wait()
+            except: pass
+            self.proc = None
+        if self.reader_task:
+            self.reader_task.cancel()
+            self.reader_task = None

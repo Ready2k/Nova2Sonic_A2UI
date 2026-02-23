@@ -234,8 +234,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
             async def handle_text_chunk(text, is_user=False):
                 if is_user:
-                    print(f"APPENDING USER TEXT: {text}", file=sys.stderr, flush=True)
+                    logger.debug(f"APPENDING USER TEXT: {text}")
                     session_data["user_transcripts"].append(text)
+                    # Send partial transcript to client for real-time feedback
+                    await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
                 else:
                     if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
                     session_data["assist_buffer"].append(text)
@@ -256,7 +258,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         current_state["messages"].append({"role": "assistant", "text": assist_text})
                         session_data["assist_buffer"] = []
 
-                    full_transcript = " ".join(session_data["user_transcripts"]).strip()
+                    full_transcript = "".join(session_data["user_transcripts"]).strip()
                     if not full_transcript:
                         return
                     session_data["user_transcripts"] = []

@@ -14,6 +14,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import dotenv from 'dotenv';
 import * as path from 'path';
+import * as readline from 'readline';
 
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
@@ -25,31 +26,23 @@ function nowIso() {
     return new Date().toISOString();
 }
 
-async function readStdin() {
-    const chunks = [];
-    for await (const chunk of process.stdin) {
-        chunks.push(chunk);
-    }
-    return Buffer.concat(chunks).toString('utf8').trim();
-}
-
 async function main() {
-    const audioB64 = await readStdin();
-    if (!audioB64) {
-        console.error(`[STT DEBUG] ${nowIso()} No audio data received via stdin`);
-        console.log('TRANSCRIPT:');
-        process.exit(0);
-    }
-
-    console.error(`[STT DEBUG] ${nowIso()} Received audio data length=${audioB64.length}`);
-
     const promptName = `stt-${Date.now()}`;
     const sysName = `sys-${Date.now()}`;
     const audioName = `audio-${Date.now()}`;
 
-    // Signal from output handler → input generator that we can finish
-    let canFinish = false;
-    const signalFinish = () => { canFinish = true; };
+    // Create a deferred promise for terminal signal from stdin
+    let stdinEndedResolver;
+    const stdinEndedPromise = new Promise(resolve => { stdinEndedResolver = resolve; });
+
+    // Create a deferred promise for Bedrock completion (optional, for clean promptEnd)
+    let bedrockDoneResolver;
+    const bedrockDonePromise = new Promise(resolve => { bedrockDoneResolver = resolve; });
+
+    const rl = readline.createInterface({
+        input: process.stdin,
+        terminal: false
+    });
 
     async function* inputStream() {
         // Session start
@@ -69,7 +62,7 @@ async function main() {
             }
         };
 
-        // Prompt start — text output only, but audio output configuration is required by the API
+        // Prompt start
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -84,14 +77,11 @@ async function main() {
                                 channelCount: 1,
                                 voiceId: 'tiffany'
                             }
-
-
                         }
                     }
                 }))
             }
         };
-
 
         // System content
         yield {
@@ -133,7 +123,7 @@ async function main() {
             }
         };
 
-        // Audio content block
+        // Audio content block start
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -158,9 +148,9 @@ async function main() {
             }
         };
 
-        // Send audio in chunks of 32 KB (base64 chars)
-        const CHUNK = 32768;
-        for (let i = 0; i < audioB64.length; i += CHUNK) {
+        // Use an async iterator to feed stdin lines into the inputStream
+        for await (const line of rl) {
+            if (!line.trim()) continue;
             yield {
                 chunk: {
                     bytes: Buffer.from(JSON.stringify({
@@ -168,7 +158,7 @@ async function main() {
                             audioInput: {
                                 promptName,
                                 contentName: audioName,
-                                content: audioB64.slice(i, i + CHUNK)
+                                content: line.trim()
                             }
                         }
                     }))
@@ -176,6 +166,7 @@ async function main() {
             };
         }
 
+        console.error(`[STT DEBUG] ${nowIso()} Stdin closed — ending audio content`);
         yield {
             chunk: {
                 bytes: Buffer.from(JSON.stringify({
@@ -184,10 +175,11 @@ async function main() {
             }
         };
 
-        // Wait for output handler to signal it has the transcript
-        while (!canFinish) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-        }
+        // Signal to output loop that we've sent everything
+        stdinEndedResolver();
+
+        // Optional: Wait for Bedrock to finish before ending prompt if you want perfectly clean closure
+        // await bedrockDonePromise;
 
         yield {
             chunk: {
@@ -223,7 +215,6 @@ async function main() {
             const rawEvent = JSON.parse(Buffer.from(event.chunk.bytes).toString());
             const eventData = rawEvent.event || rawEvent;
 
-            // contentStart: track which role/type block we're in
             if (eventData.contentStart) {
                 const role = eventData.contentStart.role;
                 const type = eventData.contentStart.type;
@@ -234,47 +225,37 @@ async function main() {
                 }
 
                 if (role === 'ASSISTANT' && type === 'TEXT') {
-                    // ASSISTANT text block starting = transcription is already done;
-                    // signal the input generator to close and stop processing.
-                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started — transcription complete`);
-                    signalFinish();
+                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started — transcription done`);
                     break;
                 }
             }
 
-            // textOutput: accumulate USER-role text (the STT transcript)
             if (eventData.textOutput) {
                 const role = eventData.textOutput.role;
                 const content = eventData.textOutput.content || '';
-                console.error(`[STT DEBUG] ${nowIso()} textOutput role=${role}: "${content}"`);
                 if (role === 'USER') {
                     userTranscript += content;
+                    console.log(`TRANSCRIPT_PARTIAL:${content}`);
                 }
             }
 
-            // contentEnd for USER TEXT block — transcript captured
             if (eventData.contentEnd && inUserTextBlock) {
                 inUserTextBlock = false;
-                console.error(`[STT DEBUG] ${nowIso()} USER text block ended, transcript="${userTranscript}"`);
-                signalFinish();
-                // Keep going — wait for promptEnd to close cleanly
+                console.error(`[STT DEBUG] ${nowIso()} USER text block ended`);
             }
 
             if (eventData.promptEnd) {
-                console.error(`[STT DEBUG] ${nowIso()} promptEnd, transcript="${userTranscript}"`);
-                signalFinish();
+                console.error(`[STT DEBUG] ${nowIso()} promptEnd`);
                 break;
             }
 
             if (eventData.internalServerException || eventData.validationException || eventData.throttlingException) {
                 console.error(`[STT DEBUG] ${nowIso()} Error event:`, JSON.stringify(eventData));
-                signalFinish();
                 break;
             }
         }
 
-        if (!canFinish) signalFinish();
-
+        bedrockDoneResolver();
         console.log(`TRANSCRIPT:${userTranscript.trim()}`);
 
     } catch (e) {

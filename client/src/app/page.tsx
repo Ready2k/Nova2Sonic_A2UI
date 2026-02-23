@@ -14,6 +14,7 @@ export default function Home() {
     voicePlaying,
     a2uiState,
     thinkingState,
+    partialTranscript,
     sendAction,
     sendText,
     sendAudioStart,
@@ -22,6 +23,7 @@ export default function Home() {
     connect,
     disconnect,
     volume,
+    isRecording,
     latency
   } = useMortgageSocket(wsUrl);
 
@@ -29,7 +31,6 @@ export default function Home() {
   const [mode, setMode] = useState<'text' | 'voice'>('text');
   const [textInput, setTextInput] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -47,14 +48,11 @@ export default function Home() {
 
   const toggleRecording = async () => {
     if (isRecording) {
-      setIsRecording(false);
       sendAudioStop();
     } else {
-      setIsRecording(true);
       try {
         await sendAudioStart();
       } catch (err) {
-        setIsRecording(false);
         console.error("Failed to start audio", err);
       }
     }
@@ -157,6 +155,14 @@ export default function Home() {
                     )}
                   </div>
                 ))}
+
+                {partialTranscript && (
+                  <div className="flex flex-col gap-1 items-end opacity-70 italic">
+                    <div className="rounded-2xl px-4 py-2 shadow-sm max-w-[85%] text-sm bg-blue-500 text-white rounded-tr-sm">
+                      {partialTranscript}...
+                    </div>
+                  </div>
+                )}
 
                 {thinkingState && (
                   <div className="flex justify-start my-2">

@@ -186,11 +186,16 @@ export function useMortgageSocket(url: string) {
     const [a2uiState, setA2uiState] = useState<A2UIPayload | null>(null);
     const [thinkingState, setThinkingState] = useState<string | null>(null);
     const [volume, setVolume] = useState(0);
+    const [partialTranscript, setPartialTranscript] = useState('');
 
 
     const [ttfb, setTtfb] = useState<number | null>(null);
     const [uiPatchLatency, setUiPatchLatency] = useState<number | null>(null);
     const [voiceLatency, setVoiceLatency] = useState<number | null>(null);
+    const [isRecording, setIsRecording] = useState(false);
+
+    const VAD_THRESHOLD = 0.015;
+    const VAD_SILENCE_TIMEOUT = 1500;
 
     const hookId = useId();
 
@@ -202,6 +207,8 @@ export function useMortgageSocket(url: string) {
     const recordingContextRef = useRef<AudioContext | null>(null);
     const recordingStreamRef = useRef<MediaStream | null>(null);
     const recordingProcessorRef = useRef<ScriptProcessorNode | null>(null);
+    const lastSpeechTimeRef = useRef<number>(0);
+    const hasSpokenRef = useRef<boolean>(false);
 
     useEffect(() => { ttfbRef.current = ttfb; }, [ttfb]);
     useEffect(() => { uiPatchLatencyRef.current = uiPatchLatency; }, [uiPatchLatency]);
@@ -257,8 +264,13 @@ export function useMortgageSocket(url: string) {
 
             if (type === 'server.ready') {
                 console.log('Server is ready');
+            } else if (type === 'server.transcript.partial') {
+                setPartialTranscript(prev => prev + (prev ? ' ' : '') + payload.text);
             } else if (type === 'server.transcript.final') {
                 const role = (payload.role || 'user') as 'user' | 'assistant';
+                if (role === 'user') {
+                    setPartialTranscript('');
+                }
                 setMessages(prev => {
                     const last = prev[prev.length - 1];
                     if (last && last.text === payload.text && last.role === role) return prev;
@@ -368,6 +380,10 @@ export function useMortgageSocket(url: string) {
         setTtfb(null);
         setUiPatchLatency(null);
         setVoiceLatency(null);
+        setPartialTranscript('');
+        setIsRecording(true);
+        lastSpeechTimeRef.current = Date.now();
+        hasSpokenRef.current = false;
 
         // If audio is playing, stop it immediately and tell the server
         if (streamerRef.current) {
@@ -448,7 +464,20 @@ registerProcessor('pcm16-processor', PCM16Processor);
 
             workletNode.port.onmessage = (e) => {
                 if (e.data.type === 'volume') {
-                    setVolume(e.data.volume);
+                    const vol = e.data.volume;
+                    setVolume(vol);
+
+                    // --- VAD Logic ---
+                    if (vol > VAD_THRESHOLD) {
+                        lastSpeechTimeRef.current = Date.now();
+                        hasSpokenRef.current = true;
+                    } else if (hasSpokenRef.current) {
+                        const silenceMs = Date.now() - lastSpeechTimeRef.current;
+                        if (silenceMs > VAD_SILENCE_TIMEOUT) {
+                            console.log(`[VAD] Silence of ${silenceMs}ms detected (threshold ${VAD_THRESHOLD}). Auto-stopping.`);
+                            sendAudioStop();
+                        }
+                    }
                     return;
                 }
 
@@ -476,6 +505,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
             // Connect to destination so the browser actually processes the audio graph
             workletNode.connect(audioCtx.destination);
         } catch (err) {
+            setIsRecording(false);
             console.error("Microphone access denied or error", err);
             throw err;
         }
@@ -495,6 +525,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
                 sessionId: clientSessionIdRef.current
             }));
         }
+        setIsRecording(false);
     };
 
     const sendModeUpdate = useCallback((newMode: 'text' | 'voice') => {
@@ -513,6 +544,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
         voicePlaying,
         a2uiState,
         thinkingState,
+        partialTranscript,
         sendAction,
         sendText,
         sendAudioStart,
@@ -521,6 +553,7 @@ registerProcessor('pcm16-processor', PCM16Processor);
         connect,
         disconnect,
         volume,
+        isRecording,
         latency: { ttfb, uiPatchLatency, voiceLatency }
     };
 
