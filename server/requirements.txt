@@ -1,13 +1,37 @@
-fastapi
-uvicorn
-pydantic
-websockets
-langgraph
-langchain
-langchain-core
-pytest
+# Python server dependencies
+# Pinned to versions validated against Python 3.10+ (tested on 3.14)
+
+# Web framework
+fastapi==0.131.0
+uvicorn==0.41.0
+starlette==0.52.1
+
+# Data validation
+pydantic==2.12.5
+
+# WebSocket client (used in integration test harness)
+websockets==16.0
+
+# LangGraph agent
+langgraph==1.0.9
+langchain==1.2.10
+langchain-core==1.2.14
+langchain-aws==1.2.5
+langsmith==0.7.6
+
+# AWS SDK (Bedrock inference + credentials)
+boto3==1.42.54
+botocore==1.42.54
+
+# Async support
+anyio==4.12.1
+
+# Environment variables
 python-dotenv==1.2.1
+
+# Geocoding (property address → lat/lng)
 geopy==2.4.1
-boto3
-botocore
-langchain-aws
+
+# Testing
+pytest==9.0.2
+httpx==0.28.1
