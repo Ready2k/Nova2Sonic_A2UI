@@ -299,7 +299,8 @@ async function main() {
         let currentContentType = null;
         let currentGenerationStage = 'FINAL';
         let inAssistantAudioBlock = false;
-        let speculativeChunks = []; // Buffer to hold speculative chunks in case no FINAL follows
+        let speculativeChunks = []; // Buffer for current speculative block
+        let speculativeFallbackChunks = []; // Prompt-level fallback if stream has no FINAL audio
 
         for await (const event of response.body) {
             if (!event.chunk?.bytes) continue;
@@ -331,7 +332,9 @@ async function main() {
                         chunksEmittedTotal++;
                         console.log(`AUDIO_CHUNK:${audioData}`);
                     } else if (currentGenerationStage === 'SPECULATIVE') {
-                        // Buffer speculative chunks just in case this is the only pass we get
+                        // Keep speculative audio only as prompt-level fallback.
+                        // We avoid emitting speculative blocks inline because FINAL blocks may follow,
+                        // which would cause duplicate playback.
                         speculativeChunks.push(audioData);
                     }
                 }
@@ -339,15 +342,9 @@ async function main() {
 
             if (eventData.contentEnd) {
                 if (currentRole === 'ASSISTANT' && currentContentType === 'AUDIO' && inAssistantAudioBlock) {
-                    // Fallback: if this block had no FINAL chunks but did have speculative audio,
-                    // emit that block so later sentences are not dropped.
+                    // Do not emit speculative chunks inline. Accumulate as fallback only.
                     if (chunksEmittedInBlock === 0 && speculativeChunks.length > 0) {
-                        console.error(`[TTS DEBUG] ${nowIso()} Fallback: Emitting ${speculativeChunks.length} speculative chunks (no FINAL pass received)`);
-                        for (const chunk of speculativeChunks) {
-                            chunksEmittedInBlock++;
-                            chunksEmittedTotal++;
-                            console.log(`AUDIO_CHUNK:${chunk}`);
-                        }
+                        speculativeFallbackChunks.push(...speculativeChunks);
                     }
                     console.error(`[TTS DEBUG] ${nowIso()} ASSISTANT AUDIO block ended. Emitted in block=${chunksEmittedInBlock} total=${chunksEmittedTotal} stage=${currentGenerationStage}`);
                     inAssistantAudioBlock = false;
@@ -378,6 +375,14 @@ async function main() {
             if (eventData.validationException) {
                 console.error('ValidationException:', eventData.validationException);
                 process.exit(1);
+            }
+        }
+
+        if (chunksEmittedTotal === 0 && speculativeFallbackChunks.length > 0) {
+            console.error(`[TTS DEBUG] ${nowIso()} FINAL audio missing; emitting ${speculativeFallbackChunks.length} speculative fallback chunks`);
+            for (const chunk of speculativeFallbackChunks) {
+                chunksEmittedTotal++;
+                console.log(`AUDIO_CHUNK:${chunk}`);
             }
         }
 
