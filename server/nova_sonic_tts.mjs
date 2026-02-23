@@ -382,7 +382,13 @@ async function main() {
                 break;
             }
 
+            if (eventData.guardrailViolation || eventData.guardrailAction) {
+                finishSignal();
+                break;
+            }
+
             if (eventData.internalServerException || eventData.throttlingException || eventData.validationException) {
+
                 finishSignal();
                 break;
             }

@@ -210,11 +210,27 @@ def render_missing_inputs(state: AgentState):
                 msg = response.content
                 
                 # Safety Refusal Check
-                refusal_keywords = ["unable to respond", "cannot fulfill", "cannot answer", "personal or people"]
-                if any(kw in msg.lower() for kw in refusal_keywords):
-                    logger.warning(f"Bedrock refusal detected in response: {msg}")
+                refusal_keywords = [
+                    "unable to respond", "cannot fulfill", "cannot answer", 
+                    "personal or people", "violate", "policy", "safety", 
+                    "guardrail", "not allowed", "cannot provide", "restricted"
+                ]
+                
+                # Check if the LLM response is a refusal OR if the transcript itself looks like a refusal
+                # (which can happen if a lower-level guardrail was transcribed).
+                transcript = state.get('transcript', '').lower()
+                is_refusal = any(kw in msg.lower() for kw in refusal_keywords) or \
+                             any(kw in transcript for kw in refusal_keywords)
+                
+                if is_refusal:
+                    if any(kw in transcript for kw in refusal_keywords):
+                        logger.warning(f"Guardrail/Refusal detected in TRANSCRIPT: {transcript}")
+                    else:
+                        logger.warning(f"Bedrock refusal detected in RESPONSE: {msg}")
+                    
                     # Provide a friendly fallback that redirects to the mortgage task
-                    msg = f"I'm here to help with your Barclays mortgage. To keep things moving, could you please tell me your {target_field}?"
+                    msg = f"I'm here to help with your Barclays mortgage. To move forward, could you please tell me your {target_field}?"
+
 
             except Exception as e:
                 logger.error(f"LLM generation error: {e}")
@@ -456,10 +472,15 @@ def render_products_a2ui(state: AgentState):
             msg = response.content
             
             # Safety Refusal Check
-            refusal_keywords = ["unable to respond", "cannot fulfill", "cannot answer", "personal or people"]
+            refusal_keywords = [
+                "unable to respond", "cannot fulfill", "cannot answer", 
+                "personal or people", "violate", "policy", "safety", 
+                "guardrail", "not allowed", "cannot provide", "restricted"
+            ]
             if any(kw in msg.lower() for kw in refusal_keywords):
                 logger.warning(f"Bedrock refusal detected in product intro: {msg}")
-                msg = f"Based on a {ltv}% LTV, I’ve found some {state.get('intent', {}).get('fixYears', 5)}-year options for you. Take a look at the products below."
+                msg = f"Based on the details provided, I’ve found some mortgage options for you. Take a look at the products below."
+
 
         except Exception as e:
             logger.error(f"LLM product intro generation error: {e}")

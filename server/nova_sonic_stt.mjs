@@ -254,7 +254,13 @@ async function main() {
                 break;
             }
 
+            if (eventData.guardrailViolation || eventData.guardrailAction) {
+                console.error(`[STT DEBUG] ${nowIso()} Guardrail event detected:`, JSON.stringify(eventData));
+                break;
+            }
+
             if (eventData.internalServerException || eventData.validationException || eventData.throttlingException) {
+
                 console.error(`[STT DEBUG] ${nowIso()} Error event:`, JSON.stringify(eventData));
                 break;
             }
