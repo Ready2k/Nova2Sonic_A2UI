@@ -1,8 +1,7 @@
 """
 plugin.py — MortgagePlugin: wraps the existing LangGraph mortgage graph.
 
-This is the Phase 1 wrapper. State shape is identical to what main.py
-created before refactoring; no mortgage logic changes here.
+Phase 3 complete: all mortgage-specific state lives under domain["mortgage"].
 """
 
 from __future__ import annotations
@@ -26,9 +25,9 @@ class MortgagePlugin(PluginBase):
 
     def create_initial_state(self) -> Dict[str, Any]:
         """
-        Identical to the create_initial_state() that was in main.py.
-        Copied here so main.py can delegate to the plugin.
-        All mortgage-specific top-level keys preserved for Phase 1–2 compat.
+        Phase 3 state shape: all mortgage-specific data lives under
+        state["domain"]["mortgage"].  CommonState envelope keys are the
+        only top-level keys shared across all plugins.
         """
         return {
             # ── CommonState envelope ──────────────────────────────────────
@@ -41,29 +40,34 @@ class MortgagePlugin(PluginBase):
             "pendingAction": None,
             "outbox": [],
             "meta": {},
+            "state_version": self.state_version,
+            # ── Mortgage domain data ──────────────────────────────────────
             "domain": {
                 "mortgage": {
+                    # Group A
                     "branch_requested": False,
+                    # Group B
                     "address_validation_failed": False,
                     "last_attempted_address": None,
+                    # Group C
                     "trouble_count": 0,
                     "show_support": False,
+                    # Group D
                     "existing_customer": None,
                     "property_seen": None,
                     "process_question": None,
+                    # Group E
+                    "intent": {
+                        "propertyValue": None,
+                        "loanBalance": None,
+                        "fixYears": None,
+                        "termYears": 25,
+                    },
+                    "ltv": 0.0,
+                    "products": [],
+                    "selection": {},
                 },
             },
-            "state_version": self.state_version,
-            # ── Mortgage-specific top-level keys (Phase 1 compat) ─────────
-            "intent": {
-                "propertyValue": None,
-                "loanBalance": None,
-                "fixYears": None,
-                "termYears": 25,
-            },
-            "ltv": 0.0,
-            "products": [],
-            "selection": {},
         }
 
     @property

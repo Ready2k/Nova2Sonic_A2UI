@@ -236,27 +236,30 @@ def _dm_get(state: dict, key: str, default=None):
     return state.get(key, default)
 
 
+def _intent(state: dict) -> dict:
+    """
+    Return the intent dict, reading from domain.mortgage.intent with
+    fallback to top-level state['intent'].
+    """
+    dm = state.get("domain", {}).get("mortgage", {})
+    if "intent" in dm:
+        return dm["intent"]
+    return state.get("intent", {})
+
+
 # ─── Agent State ───────────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
+    # ── CommonState envelope (shared with all plugins) ───────────────────
     mode: str
     device: str
     transcript: str
     messages: Annotated[List[Dict[str, Any]], append_reducer]
-    intent: Dict[str, Any]
-    ltv: float
-    products: List[Dict[str, Any]]
-    selection: Dict[str, Any]
     ui: Dict[str, Any]
     errors: Optional[Dict[str, Any]]
     pendingAction: Optional[Dict[str, Any]]
     outbox: Annotated[List[Dict[str, Any]], append_reducer]
-    domain: Dict[str, Any]                 # Plugin domain data (e.g. domain["mortgage"])
-    trouble_count: int
-    show_support: bool
-    address_validation_failed: bool        # True when last geocoding attempt found nothing
-    last_attempted_address: Optional[str]  # The address string that failed validation
-    branch_requested: bool                 # User asked to find their nearest Barclays branch
+    domain: Dict[str, Any]                 # All mortgage domain data under domain["mortgage"]
 
 
 # ─── Intent model ─────────────────────────────────────────────────────────────
@@ -288,7 +291,7 @@ def ingest_input(state: AgentState):
 def interpret_intent(state: AgentState):
     transcript = state.get("transcript", "").strip()
     logger.info(f"NODE: interpret_intent - input='{transcript}'")
-    intent = state.get("intent", {}) or {}
+    intent = _intent(state) or {}
     messages = state.get("messages", [])
 
     # Carry forward existing validation state
@@ -489,15 +492,15 @@ def interpret_intent(state: AgentState):
     _dm(state)["existing_customer"] = new_intent.get("existingCustomer")
     _dm(state)["property_seen"] = new_intent.get("propertySeen")
     _dm(state)["process_question"] = process_question
+    _dm(state)["intent"] = new_intent
 
     return {
-        "intent": new_intent,
         "domain": state.get("domain", {}),
     }
 
 
 def render_missing_inputs(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     missing = []
 
     category = intent.get("category")
@@ -548,7 +551,7 @@ def render_missing_inputs(state: AgentState):
         new_outbox.append({"type": "server.voice.say", "payload": {"text": faq_answer_text}})
         new_messages.append({"role": "assistant", "text": faq_answer_text})
 
-    category_val = state.get("intent", {}).get("category")
+    category_val = _intent(state).get("category")
     category_label = category_val if category_val else "a mortgage"
     just_selected = state.get("pendingAction", {}) and state.get("pendingAction", {}).get("data", {}).get("action") == "select_category"
 
@@ -694,7 +697,7 @@ def render_missing_inputs(state: AgentState):
                 "payload": {"text": "Once you share your property address, I can find your nearest Barclays branch!"},
             })
 
-    intent = state.get("intent", {})
+    intent = _intent(state)
     category = intent.get("category")
 
     if not category:
@@ -986,24 +989,26 @@ def render_missing_inputs(state: AgentState):
 
     _dm(state)["branch_requested"] = False
     _dm(state)["process_question"] = None
+    _dm(state)["intent"] = intent
     return {
         "outbox": new_outbox,
         "ui": ui_state,
         "messages": new_messages,
         "transcript": "",
-        "intent": intent,
         "domain": state.get("domain", {}),
     }
 
 
 def call_mortgage_tools(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
     fy = intent.get("fixYears")
 
     if pv is None or lb is None:
-        return {"ltv": 0.0, "products": []}
+        _dm(state)["ltv"] = 0.0
+        _dm(state)["products"] = []
+        return {"domain": state.get("domain", {})}
 
     ltv = calculate_ltv(pv, lb)
     products = fetch_mortgage_products(ltv, fy or 5)
@@ -1013,13 +1018,15 @@ def call_mortgage_tools(state: AgentState):
         calc = recalculate_monthly_payment(lb, p["rate"], ty, p["fee"])
         p.update(calc)
 
-    return {"ltv": ltv, "products": products}
+    _dm(state)["ltv"] = ltv
+    _dm(state)["products"] = products
+    return {"domain": state.get("domain", {})}
 
 
 def render_products_a2ui(state: AgentState):
-    ltv = state.get("ltv", 0)
-    products = state.get("products", [])
-    intent = state.get("intent", {})
+    ltv = _dm_get(state, "ltv", 0)
+    products = _dm_get(state, "products", [])
+    intent = _intent(state)
     new_outbox = []
     new_messages = []
 
@@ -1199,9 +1206,9 @@ def render_products_a2ui(state: AgentState):
                 "- Stay professional and helpful."
             )
 
-            user_msg = f"User Intent: {state.get('intent')}\n"
+            user_msg = f"User Intent: {_intent(state)}\n"
             user_msg += f"Calculated LTV: {ltv}%\n"
-            user_msg += f"Requested Fix Years: {state.get('intent', {}).get('fixYears')}\n"
+            user_msg += f"Requested Fix Years: {_intent(state).get('fixYears')}\n"
             user_msg += f"Found Products: {[{'name': p['name'], 'years': p.get('years'), 'rate': p['rate']} for p in products]}\n"
 
             response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
@@ -1218,9 +1225,9 @@ def render_products_a2ui(state: AgentState):
 
         except Exception as e:
             logger.error(f"LLM product intro generation error: {e}")
-            msg = f"Based on a {ltv}% LTV, I've found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."
+            msg = f"Based on a {ltv}% LTV, I've found some {_intent(state).get('fixYears', 5)}-year options for you."
     else:
-        msg = f"Based on a {ltv}% LTV, I've found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."
+        msg = f"Based on a {ltv}% LTV, I've found some {_intent(state).get('fixYears', 5)}-year options for you."
 
     if state.get("ui", {}).get("state") != "COMPARISON":
         new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
@@ -1241,9 +1248,9 @@ def render_products_a2ui(state: AgentState):
 
 
 def recalculate_and_patch(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     lb = intent.get("loanBalance")
-    products = state.get("products", [])
+    products = _dm_get(state, "products", [])
     ty = intent.get("termYears", 25)
 
     new_outbox = []
@@ -1268,7 +1275,8 @@ def recalculate_and_patch(state: AgentState):
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
 
-    return {"outbox": new_outbox, "ui": ui_state, "products": products, "transcript": ""}
+    _dm(state)["products"] = products
+    return {"outbox": new_outbox, "ui": ui_state, "domain": state.get("domain", {}), "transcript": ""}
 
 
 def handle_ui_action(state: AgentState):
@@ -1281,19 +1289,19 @@ def handle_ui_action(state: AgentState):
     if isinstance(data, dict) and data.get("action"):
         action_id = data.get("action")
 
-    intent = dict(state.get("intent", {}))
-    selection = dict(state.get("selection", {}))
+    intent = dict(_intent(state))
+    selection = dict(_dm_get(state, "selection", {}))
 
     if action_id == "reset_flow":
         _dm(state)["address_validation_failed"] = False
         _dm(state)["last_attempted_address"] = None
         _dm(state)["existing_customer"] = None
         _dm(state)["property_seen"] = None
+        _dm(state)["intent"] = {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None, "annualIncome": None}
+        _dm(state)["selection"] = {}
+        _dm(state)["products"] = []
+        _dm(state)["ltv"] = 0.0
         return {
-            "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None, "annualIncome": None},
-            "selection": {},
-            "products": [],
-            "ltv": 0.0,
             "errors": None,
             "transcript": "",
             "domain": state.get("domain", {}),
@@ -1301,17 +1309,22 @@ def handle_ui_action(state: AgentState):
     elif action_id == "select_category":
         category = data.get("category")
         intent["category"] = category
-        return {"intent": intent}
+        _dm(state)["intent"] = intent
+        return {"domain": state.get("domain", {})}
     elif action_id == "update_term":
         intent["termYears"] = data.get("termYears", intent.get("termYears", 25))
         selection["termYears"] = intent["termYears"]
-        return {"intent": intent, "selection": selection}
+        _dm(state)["intent"] = intent
+        _dm(state)["selection"] = selection
+        return {"domain": state.get("domain", {})}
     elif action_id == "select_product":
         selection["productId"] = data.get("productId")
-        return {"selection": selection}
+        _dm(state)["selection"] = selection
+        return {"domain": state.get("domain", {})}
     elif action_id == "confirm_application":
         selection["confirmed"] = True
-        return {"selection": selection}
+        _dm(state)["selection"] = selection
+        return {"domain": state.get("domain", {})}
 
     return {}
 
@@ -1321,16 +1334,16 @@ def clear_pending_action(state: AgentState):
 
 
 def render_summary_a2ui(state: AgentState):
-    selection = state.get("selection", {})
+    selection = _dm_get(state, "selection", {})
     product_id = selection.get("productId")
-    products = state.get("products", [])
+    products = _dm_get(state, "products", [])
     selected_prod = next((p for p in products if p["id"] == product_id), None)
     chosen = selected_prod or (products[0] if products else {})
     new_outbox = []
     new_messages = []
 
     monthly = chosen.get("monthlyPayment", 0)
-    ty = state.get("intent", {}).get("termYears", 25)
+    ty = _intent(state).get("termYears", 25)
 
     components = [
         {"id": "root", "component": "Column", "children": [
@@ -1450,7 +1463,7 @@ def root_router(state: AgentState):
     if state.get("pendingAction"):
         return "handle_ui_action"
 
-    intent = state.get("intent", {})
+    intent = _intent(state)
     if not _all_required_fields_present(intent):
         return "render_missing_inputs"
 
@@ -1482,14 +1495,14 @@ def start_router(state: AgentState):
     if state.get("transcript"):
         return "interpret_intent"
 
-    intent = state.get("intent", {})
+    intent = _intent(state)
     if not intent.get("category") or not _all_required_fields_present(intent):
         return "render_missing_inputs"
     return "call_mortgage_tools"
 
 
 def intent_router(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     if not _all_required_fields_present(intent):
         return "render_missing_inputs"
     return "call_mortgage_tools"
