@@ -229,8 +229,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # Trigger initial UI rendering (landing category screen)
         # Strip all voice.say — the landing grid is visual-only.
         # First voice fires when the user clicks a category button.
-        lf_callback = get_langfuse_callback(session_id)
-        config = {"callbacks": [lf_callback]} if lf_callback else {}
+        lf_callback = get_langfuse_callback()
+        config = {
+            "callbacks": [lf_callback],
+            "metadata": {"langfuse_session_id": session_id}
+        }
         initial_res = await asyncio.to_thread(app_graph.invoke, sessions[session_id]["state"], config)
         # Suppress any voice on initial load to avoid double-audio from React StrictMode remounts
         initial_res["outbox"] = [e for e in initial_res.get("outbox", []) if e["type"] != "server.voice.say"]
@@ -306,8 +309,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
                     
                     try:
-                        lf_callback = get_langfuse_callback(sid)
-                        config = {"callbacks": [lf_callback]} if lf_callback else {}
+                        lf_callback = get_langfuse_callback()
+                        config = {
+                            "callbacks": [lf_callback],
+                            "metadata": {"langfuse_session_id": sid}
+                        }
                         res = await asyncio.to_thread(app_graph.invoke, current_state, config)
                         if sid in sessions:
                             sessions[sid]["state"] = res
@@ -402,8 +408,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 await send_msg(websocket, sid, "server.agent.thinking", {"state": "rendering_ui"})
                 
                 try:
-                    lf_callback = get_langfuse_callback(sid)
-                    config = {"callbacks": [lf_callback]} if lf_callback else {}
+                    lf_callback = get_langfuse_callback()
+                    config = {
+                        "callbacks": [lf_callback],
+                        "metadata": {"langfuse_session_id": sid}
+                    }
                     res = await asyncio.to_thread(app_graph.invoke, state, config)
                     if sid in sessions:
                         sessions[sid]["state"] = res
@@ -426,8 +435,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     current_state["pendingAction"] = {"id": action_id, "data": data}
                     
                     try:
-                        lf_callback = get_langfuse_callback(sid)
-                        config = {"callbacks": [lf_callback]} if lf_callback else {}
+                        lf_callback = get_langfuse_callback()
+                        config = {
+                            "callbacks": [lf_callback],
+                            "metadata": {"langfuse_session_id": sid}
+                        }
                         res = await asyncio.to_thread(app_graph.invoke, current_state, config)
                         if sid in sessions:
                             sessions[sid]["state"] = res

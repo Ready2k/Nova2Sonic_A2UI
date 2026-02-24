@@ -125,7 +125,8 @@ export default function Home() {
     e.preventDefault();
     if (textInput.trim() || selectedImage) {
       if (langfuse) {
-        langfuse.track("user_message", {
+        langfuse.trace({
+          name: "user_message",
           metadata: { text: textInput, hasImage: !!selectedImage }
         });
       }
