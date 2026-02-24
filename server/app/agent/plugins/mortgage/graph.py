@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Asset directory: override with ASSETS_DIR env var (set in Docker to /assets).
 # Falls back to the repository root resolved relative to this file's location.
-_ASSETS_DIR = os.getenv("ASSETS_DIR", str(Path(__file__).resolve().parents[3]))
+_ASSETS_DIR = os.getenv("ASSETS_DIR", str(Path(__file__).resolve().parents[5]))
 
 def append_reducer(a: list, b: list) -> list:
     return a + b
