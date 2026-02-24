@@ -41,7 +41,11 @@ class MortgagePlugin(PluginBase):
             "pendingAction": None,
             "outbox": [],
             "meta": {},
-            "domain": {},
+            "domain": {
+                "mortgage": {
+                    "branch_requested": False,
+                },
+            },
             "state_version": self.state_version,
             # ── Mortgage-specific top-level keys (Phase 1 compat) ─────────
             "intent": {
@@ -59,7 +63,6 @@ class MortgagePlugin(PluginBase):
             "show_support": False,
             "address_validation_failed": False,
             "last_attempted_address": None,
-            "branch_requested": False,
             "process_question": None,
         }
 

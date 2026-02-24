@@ -213,6 +213,29 @@ def _answer_process_question(question: str, intent: dict, current_stage: str) ->
         return _faq_fallback(question)
 
 
+# ── Domain state accessors ─────────────────────────────────────────────────────
+# These provide backward-compatible reads during the Phase 3 migration.
+# Once all top-level fields are removed, these can be inlined or deleted.
+
+def _dm(state: dict) -> dict:
+    """Return the mortgage domain sub-dict, creating it if absent."""
+    domain = state.setdefault("domain", {})
+    if "mortgage" not in domain:
+        domain["mortgage"] = {}
+    return domain["mortgage"]
+
+
+def _dm_get(state: dict, key: str, default=None):
+    """
+    Read a field from domain.mortgage with fallback to top-level key.
+    Supports the dual-write window where both paths may exist.
+    """
+    dm = state.get("domain", {}).get("mortgage", {})
+    if key in dm:
+        return dm[key]
+    return state.get(key, default)
+
+
 # ─── Agent State ───────────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
@@ -228,6 +251,7 @@ class AgentState(TypedDict):
     errors: Optional[Dict[str, Any]]
     pendingAction: Optional[Dict[str, Any]]
     outbox: Annotated[List[Dict[str, Any]], append_reducer]
+    domain: Dict[str, Any]                 # Plugin domain data (e.g. domain["mortgage"])
     existing_customer: Optional[bool]
     property_seen: Optional[bool]
     trouble_count: int
@@ -460,6 +484,8 @@ def interpret_intent(state: AgentState):
     show_support = new_trouble_count >= 2
     logger.info(f"Trouble State: count={new_trouble_count}, show_support={show_support}, transcript='{transcript}'")
 
+    _dm(state)["branch_requested"] = branch_requested
+
     return {
         "intent": new_intent,
         "existing_customer": new_intent.get("existingCustomer"),
@@ -468,7 +494,7 @@ def interpret_intent(state: AgentState):
         "show_support": show_support,
         "address_validation_failed": address_validation_failed,
         "last_attempted_address": last_attempted_address,
-        "branch_requested": branch_requested,
+        "domain": state.get("domain", {}),
         "process_question": process_question,
     }
 
@@ -624,7 +650,7 @@ def render_missing_inputs(state: AgentState):
     # ── Branch request handling ───────────────────────────────────────────────
     branch_outbox_items = []
     branch_components = []
-    if state.get("branch_requested"):
+    if _dm_get(state, "branch_requested", False):
         lat = intent.get("lat")
         lng = intent.get("lng")
         if lat and lng:
@@ -775,7 +801,8 @@ def render_missing_inputs(state: AgentState):
         new_outbox.extend(branch_outbox_items)
         ui_state = dict(state.get("ui", {}))
         ui_state["state"] = "LOADING"
-        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "branch_requested": False, "process_question": None}
+        _dm(state)["branch_requested"] = False
+        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "domain": state.get("domain", {}), "process_question": None}
 
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
@@ -959,13 +986,14 @@ def render_missing_inputs(state: AgentState):
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "LOADING"
 
+    _dm(state)["branch_requested"] = False
     return {
         "outbox": new_outbox,
         "ui": ui_state,
         "messages": new_messages,
         "transcript": "",
         "intent": intent,
-        "branch_requested": False,
+        "domain": state.get("domain", {}),
         "process_question": None,
     }
 
@@ -1091,7 +1119,7 @@ def render_products_a2ui(state: AgentState):
         })
 
     # ── Branch request handling ───────────────────────────────────────────────
-    if state.get("branch_requested"):
+    if _dm_get(state, "branch_requested", False):
         lat = intent.get("lat")
         lng = intent.get("lng")
         if lat and lng:
@@ -1203,12 +1231,13 @@ def render_products_a2ui(state: AgentState):
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
 
+    _dm(state)["branch_requested"] = False
     return {
         "outbox": new_outbox,
         "ui": ui_state,
         "messages": new_messages,
         "transcript": "",
-        "branch_requested": False,
+        "domain": state.get("domain", {}),
         "process_question": None,
     }
 
