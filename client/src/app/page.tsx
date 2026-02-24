@@ -5,6 +5,7 @@ import Image from 'next/image';
 import { useMortgageSocket } from '../hooks/useMortgageSocket';
 import A2Renderer, { A2UIPayload } from '../components/A2Renderer';
 import LatencyHud from '../components/LatencyHud';
+import { langfuse } from '../lib/langfuse';
 
 export default function Home() {
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
@@ -123,6 +124,11 @@ export default function Home() {
   const submitText = (e: React.FormEvent) => {
     e.preventDefault();
     if (textInput.trim() || selectedImage) {
+      if (langfuse) {
+        langfuse.track("user_message", {
+          metadata: { text: textInput, hasImage: !!selectedImage }
+        });
+      }
       sendText(textInput, selectedImage || undefined);
       setTextInput('');
       setSelectedImage(null);
