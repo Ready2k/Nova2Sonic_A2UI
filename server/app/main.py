@@ -89,7 +89,6 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
         await proc.wait()
         await stderr_task
 
-        logger.info(f"[TTS] Process completed, sent {chunk_count} total chunks")
     except Exception as e:
         logger.error(f"TTS fallback failed: {e}")
     finally:
@@ -98,6 +97,116 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
             sessions[session_id]["voice_playing"] = False
         logger.info(f"[TTS] Sending voice.stop for {session_id}")
         await send_msg(websocket, session_id, "server.voice.stop", {})
+
+
+async def start_sonic_stt(websocket: WebSocket, sid: str):
+    """Pre-warms or starts the Nova Sonic STT process."""
+    session_data = sessions.get(sid)
+    if not session_data:
+        return None
+        
+    if session_data.get("sonic"):
+        return session_data["sonic"]
+
+    # Verbatim STT prompt optimized for short mortgage-related responses
+    stt_system_prompt = (
+        "You are a verbatim speech-to-text transcriber for a mortgage assistant. "
+        "Output ONLY the exact words spoken by the user. If they say 'yes', 'no', 'I do', or 'yep', output exactly that. "
+        "Do not add punctuation, do not add commentary, and do not try to fix the user's grammar."
+    )
+
+    async def _on_text_chunk(text, is_user=False, is_final=False):
+        await handle_text_chunk(websocket, sid, text, is_user=True, is_final=is_final)
+
+    async def _handle_finished():
+        await handle_finished_for_sid(websocket, sid)
+
+    sonic = NovaSonicSession(
+        on_audio_chunk=lambda x, **kw: None,
+        on_text_chunk=_on_text_chunk,
+        on_finished=_handle_finished
+    )
+    
+    session_data["sonic"] = sonic
+    session_data["user_transcripts"] = []
+
+    try:
+        await sonic.start_session()
+        await sonic.start_audio_input(system_prompt=stt_system_prompt)
+        return sonic
+    except Exception as e:
+        logger.error(f"Failed to start Nova Sonic session: {e}", exc_info=True)
+        return None
+
+
+async def handle_text_chunk(websocket: WebSocket, sid: str, text: str, is_user=False, is_final=False):
+    session_data = sessions.get(sid)
+    if not session_data: return
+    
+    if is_user:
+        if is_final:
+            logger.info(f"FINAL USER TEXT RECEIVED: {text}")
+            session_data["user_transcripts"] = [text]
+        else:
+            logger.debug(f"APPENDING USER TEXT: {text}")
+            session_data["user_transcripts"].append(text)
+        # Send partial transcript to client for real-time feedback
+        await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
+    else:
+        if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
+        session_data["assist_buffer"].append(text)
+        await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
+
+
+async def handle_finished_for_sid(websocket: WebSocket, sid: str):
+    session_data = sessions.get(sid)
+    if not session_data: return
+    
+    current_state = session_data["state"]
+    if session_data.get("handling_finished"):
+        logger.warning(f"Nova Sonic: handle_finished already in progress for {sid}, skipping duplicate.")
+        return
+    
+    session_data["handling_finished"] = True
+    try:
+        assist_text = "".join(session_data.get("assist_buffer", [])).strip()
+        if assist_text:
+            current_state["messages"].append({"role": "assistant", "text": assist_text})
+            session_data["assist_buffer"] = []
+
+        full_transcript = "".join(session_data["user_transcripts"]).strip()
+        # Continue even if empty to detect silence/trouble
+        session_data["user_transcripts"] = []
+        
+        await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
+        
+        current_state["transcript"] = full_transcript
+        current_state["mode"] = "voice"
+        if full_transcript:
+            current_state["messages"].append({"role": "user", "text": full_transcript})
+        
+        await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
+        
+        try:
+            lf_callback = get_langfuse_callback()
+            config = {
+                "callbacks": [lf_callback],
+                "metadata": {
+                    "langfuse_session_id": sid,
+                    "agent_id": session_data.get("agent_id", "mortgage"),
+                },
+            }
+            _plugin = get_plugin(session_data.get("agent_id", "mortgage"))
+            res = await invoke_graph(_plugin, current_state, config)
+            if sid in sessions:
+                sessions[sid]["state"] = res
+            await process_outbox(websocket, sid)
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in LangGraph matching (voice/finished): {e}")
+            traceback.print_exc()
+    finally:
+        session_data["handling_finished"] = False
 
 
 async def process_outbox(websocket: WebSocket, sid: str):
@@ -187,9 +296,13 @@ async def process_outbox(websocket: WebSocket, sid: str):
             elif not session_data.get("voice_playing"):
                 logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
                 session_data["voice_playing"] = True
-                # Notify client immediately so it shows "Speaking" before first audio chunk
+                # Notify client immediately
                 await send_msg(websocket, sid, "server.voice.start", {})
-                # Fire TTS as background task; store task so we can cancel on disconnect
+                
+                # PRE-WARM STT: Start the STT process in background while TTS is playing
+                asyncio.create_task(start_sonic_stt(websocket, sid))
+                
+                # Fire TTS as background task
                 tts_task = asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
                 session_data["tts_task"] = tts_task
             else:
@@ -270,106 +383,10 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
             
             state = session_data["state"]
 
-            if msg_type in ["client.audio.start", "client.audio.stop"]:
-                logger.info(f"--- Received '{msg_type}' from {sid} ---")
-
-            # Inline helpers for Nova Sonic callbacks
-            async def handle_audio_chunk(chunk_b64):
-                await send_msg(websocket, sid, "server.voice.audio", {"data": chunk_b64})
-
-            async def handle_text_chunk(text, is_user=False, is_final=False):
-                if is_user:
-                    if is_final:
-                        logger.info(f"FINAL USER TEXT RECEIVED: {text}")
-                        session_data["user_transcripts"] = [text]
-                    else:
-                        logger.debug(f"APPENDING USER TEXT: {text}")
-                        session_data["user_transcripts"].append(text)
-                    # Send partial transcript to client for real-time feedback
-                    await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
-                else:
-                    if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
-                    session_data["assist_buffer"].append(text)
-                    await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
-
-            async def handle_finished():
-                # Use local session_data reference to avoid KeyErrors if session is cleaned up
-                current_state = session_data["state"]
-                
-                if session_data.get("handling_finished"):
-                    logger.warning(f"Nova Sonic: handle_finished already in progress for {sid}, skipping duplicate.")
-                    return
-                
-                session_data["handling_finished"] = True
-                try:
-                    assist_text = "".join(session_data.get("assist_buffer", [])).strip()
-                    if assist_text:
-                        current_state["messages"].append({"role": "assistant", "text": assist_text})
-                        session_data["assist_buffer"] = []
-
-                    full_transcript = "".join(session_data["user_transcripts"]).strip()
-                    # Continue even if empty to detect silence/trouble
-                    session_data["user_transcripts"] = []
-                    
-                    await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
-                    
-                    current_state["transcript"] = full_transcript
-                    current_state["mode"] = "voice"
-                    if full_transcript:
-                        current_state["messages"].append({"role": "user", "text": full_transcript})
-                    
-                    await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
-                    
-                    try:
-                        lf_callback = get_langfuse_callback()
-                        config = {
-                            "callbacks": [lf_callback],
-                            "metadata": {
-                                "langfuse_session_id": sid,
-                                "agent_id": sessions[sid].get("agent_id", "mortgage"),
-                            },
-                        }
-                        _plugin = get_plugin(session_data.get("agent_id", "mortgage"))
-                        res = await invoke_graph(_plugin, current_state, config)
-                        if sid in sessions:
-                            sessions[sid]["state"] = res
-                        await process_outbox(websocket, sid)
-                    except Exception as e:
-                        import traceback
-                        logger.error(f"Error in LangGraph matching (voice/finished): {e}")
-                        traceback.print_exc()
-                finally:
-                    session_data["handling_finished"] = False
                 
             if msg_type == "client.audio.start":
-                # Allow audio input regardless of current mode - mode will be set to "voice" when transcript is ready
-                if session_data["sonic"]:
-                    try:
-                        await session_data["sonic"].end_session()
-                    except: pass
-                
-                # Nova Sonic is used for STT transcription only.
-                # The non-bidirectional API returns only assistant-role text (the model's echo of the user's speech).
-                # We capture all text output and treat it as the user's spoken words.
-                async def _on_text_chunk(text, is_user=False, is_final=False):
-                    await handle_text_chunk(text, is_user=True, is_final=is_final)
-
-                sonic = NovaSonicSession(
-                    on_audio_chunk=lambda x, **kw: None,  # Suppress Nova Sonic's own audio output
-                    on_text_chunk=_on_text_chunk,
-                    on_finished=handle_finished
-                )
-                
-                session_data["sonic"] = sonic
-                session_data["user_transcripts"] = []
-                
-                try:
-                    if not os.getenv("AWS_ACCESS_KEY_ID"):
-                        logger.warning("AWS Credentials not found. Nova Sonic will fail.")
-                    await sonic.start_session()
-                    await sonic.start_audio_input()
-                except Exception as e:
-                    logger.error(f"Failed to start Nova Sonic session: {e}", exc_info=True)
+                # Re-use or start the sonic session
+                await start_sonic_stt(websocket, sid)
                 
             elif msg_type == "client.audio.chunk":
                 if session_data["sonic"]:
@@ -378,7 +395,7 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
                         if "chunk_count" not in session_data:
                             session_data["chunk_count"] = 0
                         session_data["chunk_count"] += 1
-                        if session_data["chunk_count"] % 50 == 0:
+                        if session_data["chunk_count"] % 10 == 0:
                             logger.info(f"--- Received {session_data['chunk_count']} audio chunks so far ---")
                         await session_data["sonic"].send_audio_chunk(b64)
                         

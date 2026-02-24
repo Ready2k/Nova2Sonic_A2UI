@@ -492,6 +492,7 @@ def interpret_intent(state: AgentState):
     _dm(state)["existing_customer"] = new_intent.get("existingCustomer")
     _dm(state)["property_seen"] = new_intent.get("propertySeen")
     _dm(state)["process_question"] = process_question
+    _dm(state)["last_question_context"] = last_question_context
     _dm(state)["intent"] = new_intent
 
     return {
@@ -646,6 +647,12 @@ def render_missing_inputs(state: AgentState):
 
         new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
         new_messages.append({"role": "assistant", "text": msg})
+        
+        # Store context for STT biasing
+        ctx = f"The user is being asked about their {target_field}. " + \
+              ("They might be saying 'yes', 'no', or providing a value." if target_field in ["existingCustomer", "propertySeen"] else "")
+        _dm(state)["last_question_context"] = ctx
+        logger.info(f"Setting STT context: {ctx}")
 
     # ── Branch request handling ───────────────────────────────────────────────
     branch_outbox_items = []

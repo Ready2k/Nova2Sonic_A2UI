@@ -196,8 +196,8 @@ export function useMortgageSocket(url: string) {
     const [voiceLatency, setVoiceLatency] = useState<number | null>(null);
     const [isRecording, setIsRecording] = useState(false);
 
-    const VAD_THRESHOLD = 0.015;
-    const VAD_SILENCE_TIMEOUT = 1500;
+    const VAD_THRESHOLD = 0.01;
+    const VAD_SILENCE_TIMEOUT = 2000;
 
     const hookId = useId();
 
@@ -315,6 +315,19 @@ export function useMortgageSocket(url: string) {
                 }
             } else if (type === 'server.voice.stop') {
                 console.log('[WebSocket] Received server.voice.stop, streamer exists:', !!streamerRef.current);
+
+                // Auto-restart listening IMMEDIATELY once the server is done sending audio.
+                // We don't wait for playback to finish - this allows the user to 'barge in' 
+                // and ensures the mic is ready the moment the assistant stops speaking.
+                if (modeRef.current === 'voice' && connected) {
+                    console.log('[Auto-Restart] Server finished sending voice, scheduling mic in 400ms');
+                    setTimeout(() => {
+                        if (modeRef.current === 'voice' && connected) {
+                            sendAudioStart(false).catch(err => console.error('[Auto-Restart] Failed:', err));
+                        }
+                    }, 400);
+                }
+
                 if (streamerRef.current) {
                     const oldStreamer = streamerRef.current;
                     // Null out immediately so the next server.voice.audio creates a fresh streamer.
@@ -323,11 +336,6 @@ export function useMortgageSocket(url: string) {
                     // AudioBufferSourceNode.onended before closing the context.
                     oldStreamer.finishPlayback(() => {
                         setVoicePlaying(false);
-                        // Auto-restart listening if in voice mode and the server isn't thinking
-                        if (modeRef.current === 'voice' && connected) {
-                            console.log('[Auto-Restart] Voice playback finished, re-enabling mic');
-                            sendAudioStart().catch(err => console.error('[Auto-Restart] Failed:', err));
-                        }
                     });
                 }
             } else if (type === 'server.a2ui.patch') {
@@ -385,7 +393,7 @@ export function useMortgageSocket(url: string) {
         }
     };
 
-    const sendAudioStart = async () => {
+    const sendAudioStart = async (interrupt: boolean = true) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
             throw new Error("WebSocket is not connected");
         }
@@ -399,8 +407,9 @@ export function useMortgageSocket(url: string) {
         lastSpeechTimeRef.current = Date.now();
         hasSpokenRef.current = false;
 
-        // If audio is playing, stop it immediately and tell the server
-        if (streamerRef.current) {
+        // If 'interrupt' is true, we kill any current playback immediately.
+        // If false (auto-restart), we let the playback finish naturally.
+        if (interrupt && streamerRef.current) {
             socket.send(JSON.stringify({
                 type: 'client.audio.interrupt',
                 sessionId: clientSessionIdRef.current

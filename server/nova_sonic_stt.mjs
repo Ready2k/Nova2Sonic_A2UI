@@ -108,7 +108,7 @@ async function main() {
                         textInput: {
                             promptName,
                             contentName: sysName,
-                            content: 'You are a speech-to-text transcription service. Output ONLY the verbatim words the user spoke — no commentary, no prefix, no explanation.'
+                            content: process.argv[2] || 'You are a speech-to-text transcription service. Output ONLY the verbatim words the user spoke — no commentary, no prefix, no explanation.'
                         }
                     }
                 }))
@@ -149,8 +149,13 @@ async function main() {
         };
 
         // Use an async iterator to feed stdin lines into the inputStream
+        let chunkCount = 0;
         for await (const line of rl) {
             if (!line.trim()) continue;
+            chunkCount++;
+            if (chunkCount % 10 === 0) {
+                console.error(`[STT DEBUG] ${nowIso()} Received ${chunkCount} audio chunks from stdin`);
+            }
             yield {
                 chunk: {
                     bytes: Buffer.from(JSON.stringify({
@@ -230,15 +235,20 @@ async function main() {
                 }
 
                 if (role === 'ASSISTANT' && type === 'TEXT') {
-                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started — transcription done`);
-                    break;
+                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started (transcription stream)`);
+                    inUserTextBlock = true; // Treat assistant output as the transcription content
                 }
             }
 
             if (eventData.textOutput) {
                 const role = eventData.textOutput.role;
                 const content = eventData.textOutput.content || '';
-                if (role === 'USER') {
+
+                // --- Simple De-duplication Logic ---
+                // If the model sends the same text in both USER and ASSISTANT roles,
+                // we only want to accumulate it once. 
+                // We'll prioritize the ASSISTANT role for literal transcripts.
+                if (role === 'ASSISTANT' || (role === 'USER' && !userTranscript.includes(content))) {
                     userTranscript += content;
                     console.log(`TRANSCRIPT_PARTIAL:${content}`);
                 }
