@@ -201,6 +201,13 @@ async def process_outbox(websocket: WebSocket, sid: str):
         session_data["processing_outbox"] = False
 
 
+@app.get("/agents")
+async def list_agents():
+    """Return registered agent plugin IDs. Used for health checks and tooling."""
+    from .agent.core.registry import list_plugins
+    return {"agents": list_plugins()}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
     # Validate agent_id before accepting so we can reject with a close code.
@@ -234,7 +241,10 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
         lf_callback = get_langfuse_callback()
         config = {
             "callbacks": [lf_callback],
-            "metadata": {"langfuse_session_id": session_id}
+            "metadata": {
+                "langfuse_session_id": session_id,
+                "agent_id": sessions[session_id].get("agent_id", "mortgage"),
+            },
         }
         initial_res = await invoke_graph(plugin, sessions[session_id]["state"], config)
         # Suppress any voice on initial load to avoid double-audio from React StrictMode remounts
@@ -314,7 +324,10 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
                         lf_callback = get_langfuse_callback()
                         config = {
                             "callbacks": [lf_callback],
-                            "metadata": {"langfuse_session_id": sid}
+                            "metadata": {
+                                "langfuse_session_id": sid,
+                                "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                            },
                         }
                         _plugin = get_plugin(session_data.get("agent_id", "mortgage"))
                         res = await invoke_graph(_plugin, current_state, config)
@@ -414,7 +427,10 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
                     lf_callback = get_langfuse_callback()
                     config = {
                         "callbacks": [lf_callback],
-                        "metadata": {"langfuse_session_id": sid}
+                        "metadata": {
+                            "langfuse_session_id": sid,
+                            "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                        },
                     }
                     _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
                     res = await invoke_graph(_plugin, state, config)
@@ -442,7 +458,10 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
                         lf_callback = get_langfuse_callback()
                         config = {
                             "callbacks": [lf_callback],
-                            "metadata": {"langfuse_session_id": sid}
+                            "metadata": {
+                                "langfuse_session_id": sid,
+                                "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                            },
                         }
                         _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
                         res = await invoke_graph(_plugin, current_state, config)
@@ -479,7 +498,10 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
                     lf_callback = get_langfuse_callback()
                     config = {
                         "callbacks": [lf_callback],
-                        "metadata": {"langfuse_session_id": sid},
+                        "metadata": {
+                            "langfuse_session_id": sid,
+                            "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                        },
                     }
                     _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
                     try:
