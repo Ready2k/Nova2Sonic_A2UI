@@ -16,10 +16,11 @@ from .agent.core.contracts import PluginBase
 from .agent.core.registry import register, get_plugin
 from .agent.core.runtime_adapter import invoke_graph
 from .agent.plugins.mortgage.plugin import MortgagePlugin
+from .agent.plugins.lost_card.plugin import LostCardPlugin
 
 # Register all plugins at startup.
-# Add new plugins here when created in Phase 2.
 register(MortgagePlugin())
+register(LostCardPlugin())
 from .nova_sonic import NovaSonicSession
 from .langfuse_util import get_langfuse_callback
 
