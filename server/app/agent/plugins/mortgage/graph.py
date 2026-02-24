@@ -451,7 +451,7 @@ def interpret_intent(state: AgentState):
         logger.info(f"Process question detected: '{process_question}'")
 
     # ── Trouble counting ──────────────────────────────────────────────────────
-    new_trouble_count = state.get("trouble_count", 0)
+    new_trouble_count = _dm_get(state, "trouble_count", 0)
 
     if not transcript:
         new_trouble_count += 1
@@ -487,13 +487,13 @@ def interpret_intent(state: AgentState):
     _dm(state)["branch_requested"] = branch_requested
     _dm(state)["address_validation_failed"] = address_validation_failed
     _dm(state)["last_attempted_address"] = last_attempted_address
+    _dm(state)["trouble_count"] = new_trouble_count
+    _dm(state)["show_support"] = show_support
 
     return {
         "intent": new_intent,
         "existing_customer": new_intent.get("existingCustomer"),
         "property_seen": new_intent.get("propertySeen"),
-        "trouble_count": new_trouble_count,
-        "show_support": show_support,
         "domain": state.get("domain", {}),
         "process_question": process_question,
     }

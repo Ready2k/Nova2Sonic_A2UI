@@ -129,7 +129,11 @@ async def process_outbox(websocket: WebSocket, sid: str):
                 logger.info(f"Emitting from outbox: {event['type']}")
                 payload = event.get("payload", {}) or {}
                 if event["type"] == "server.a2ui.patch":
-                    payload["showSupport"] = state.get("show_support", False)
+                    payload["showSupport"] = (
+                        state.get("domain", {})
+                        .get("mortgage", {})
+                        .get("show_support", False)
+                    )
                 await send_msg(websocket, sid, event["type"], payload)
 
                 if event["type"] == "server.transcript.final":
