@@ -48,6 +48,9 @@ class MortgagePlugin(PluginBase):
                     "last_attempted_address": None,
                     "trouble_count": 0,
                     "show_support": False,
+                    "existing_customer": None,
+                    "property_seen": None,
+                    "process_question": None,
                 },
             },
             "state_version": self.state_version,
@@ -61,9 +64,6 @@ class MortgagePlugin(PluginBase):
             "ltv": 0.0,
             "products": [],
             "selection": {},
-            "existing_customer": None,
-            "property_seen": None,
-            "process_question": None,
         }
 
     @property

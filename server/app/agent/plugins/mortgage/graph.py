@@ -252,14 +252,11 @@ class AgentState(TypedDict):
     pendingAction: Optional[Dict[str, Any]]
     outbox: Annotated[List[Dict[str, Any]], append_reducer]
     domain: Dict[str, Any]                 # Plugin domain data (e.g. domain["mortgage"])
-    existing_customer: Optional[bool]
-    property_seen: Optional[bool]
     trouble_count: int
     show_support: bool
     address_validation_failed: bool        # True when last geocoding attempt found nothing
     last_attempted_address: Optional[str]  # The address string that failed validation
     branch_requested: bool                 # User asked to find their nearest Barclays branch
-    process_question: Optional[str]        # A question about the mortgage process that needs answering
 
 
 # ─── Intent model ─────────────────────────────────────────────────────────────
@@ -489,13 +486,13 @@ def interpret_intent(state: AgentState):
     _dm(state)["last_attempted_address"] = last_attempted_address
     _dm(state)["trouble_count"] = new_trouble_count
     _dm(state)["show_support"] = show_support
+    _dm(state)["existing_customer"] = new_intent.get("existingCustomer")
+    _dm(state)["property_seen"] = new_intent.get("propertySeen")
+    _dm(state)["process_question"] = process_question
 
     return {
         "intent": new_intent,
-        "existing_customer": new_intent.get("existingCustomer"),
-        "property_seen": new_intent.get("propertySeen"),
         "domain": state.get("domain", {}),
-        "process_question": process_question,
     }
 
 
@@ -543,7 +540,7 @@ def render_missing_inputs(state: AgentState):
 
     # ── Answer any process question first ────────────────────────────────────
     faq_answer_text = None
-    faq_question_text = state.get("process_question")
+    faq_question_text = _dm_get(state, "process_question")
     if faq_question_text:
         ui_stage = state.get("ui", {}).get("state", "data collection")
         faq_answer_text = _answer_process_question(faq_question_text, intent, ui_stage)
@@ -802,7 +799,8 @@ def render_missing_inputs(state: AgentState):
         ui_state = dict(state.get("ui", {}))
         ui_state["state"] = "LOADING"
         _dm(state)["branch_requested"] = False
-        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "domain": state.get("domain", {}), "process_question": None}
+        _dm(state)["process_question"] = None
+        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "domain": state.get("domain", {})}
 
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
@@ -987,6 +985,7 @@ def render_missing_inputs(state: AgentState):
     ui_state["state"] = "LOADING"
 
     _dm(state)["branch_requested"] = False
+    _dm(state)["process_question"] = None
     return {
         "outbox": new_outbox,
         "ui": ui_state,
@@ -994,7 +993,6 @@ def render_missing_inputs(state: AgentState):
         "transcript": "",
         "intent": intent,
         "domain": state.get("domain", {}),
-        "process_question": None,
     }
 
 
@@ -1027,7 +1025,7 @@ def render_products_a2ui(state: AgentState):
 
     # ── Answer any process question first ────────────────────────────────────
     products_faq_answer = None
-    products_faq_question = state.get("process_question")
+    products_faq_question = _dm_get(state, "process_question")
     if products_faq_question:
         products_faq_answer = _answer_process_question(products_faq_question, intent, "product comparison")
         logger.info(f"Answering process question (products): '{products_faq_question}' -> '{products_faq_answer[:80]}...'")
@@ -1232,13 +1230,13 @@ def render_products_a2ui(state: AgentState):
     ui_state["state"] = "COMPARISON"
 
     _dm(state)["branch_requested"] = False
+    _dm(state)["process_question"] = None
     return {
         "outbox": new_outbox,
         "ui": ui_state,
         "messages": new_messages,
         "transcript": "",
         "domain": state.get("domain", {}),
-        "process_question": None,
     }
 
 
@@ -1289,6 +1287,8 @@ def handle_ui_action(state: AgentState):
     if action_id == "reset_flow":
         _dm(state)["address_validation_failed"] = False
         _dm(state)["last_attempted_address"] = None
+        _dm(state)["existing_customer"] = None
+        _dm(state)["property_seen"] = None
         return {
             "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None, "annualIncome": None},
             "selection": {},
@@ -1296,8 +1296,6 @@ def handle_ui_action(state: AgentState):
             "ltv": 0.0,
             "errors": None,
             "transcript": "",
-            "existing_customer": None,
-            "property_seen": None,
             "domain": state.get("domain", {}),
         }
     elif action_id == "select_category":
