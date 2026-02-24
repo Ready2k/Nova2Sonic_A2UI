@@ -123,9 +123,10 @@ async def process_outbox(websocket: WebSocket, sid: str):
         logger.info(f"[process_outbox] Processing {len(outbox)} events, {voice_say_count} voice.say events")
         
         # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
+        _SKIP_TYPES = {"server.voice.say", "server.audit.event", "server.internal.chain_action"}
         assistant_transcripts_sent = set()
         for event in outbox:
-            if event["type"] != "server.voice.say":
+            if event["type"] not in _SKIP_TYPES:
                 logger.info(f"Emitting from outbox: {event['type']}")
                 payload = event.get("payload", {}) or {}
                 if event["type"] == "server.a2ui.patch":

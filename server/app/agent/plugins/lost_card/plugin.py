@@ -48,6 +48,7 @@ class LostCardPlugin(PluginBase):
                     "suspicious_tx": [],
                     "branch_requested": False,
                     "escalation_required": False,
+                    "audit_log": [],
                 },
             },
         }
