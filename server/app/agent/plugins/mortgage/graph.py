@@ -295,8 +295,8 @@ def interpret_intent(state: AgentState):
     messages = state.get("messages", [])
 
     # Carry forward existing validation state
-    address_validation_failed = state.get("address_validation_failed", False)
-    last_attempted_address = state.get("last_attempted_address")
+    address_validation_failed = _dm_get(state, "address_validation_failed", False)
+    last_attempted_address = _dm_get(state, "last_attempted_address")
 
     # Determine what question was last asked (so we can interpret short answers like "yes" correctly)
     last_question_context = ""
@@ -485,6 +485,8 @@ def interpret_intent(state: AgentState):
     logger.info(f"Trouble State: count={new_trouble_count}, show_support={show_support}, transcript='{transcript}'")
 
     _dm(state)["branch_requested"] = branch_requested
+    _dm(state)["address_validation_failed"] = address_validation_failed
+    _dm(state)["last_attempted_address"] = last_attempted_address
 
     return {
         "intent": new_intent,
@@ -492,8 +494,6 @@ def interpret_intent(state: AgentState):
         "property_seen": new_intent.get("propertySeen"),
         "trouble_count": new_trouble_count,
         "show_support": show_support,
-        "address_validation_failed": address_validation_failed,
-        "last_attempted_address": last_attempted_address,
         "domain": state.get("domain", {}),
         "process_question": process_question,
     }
@@ -562,8 +562,8 @@ def render_missing_inputs(state: AgentState):
 
         # Build extra context for the LLM when an address attempt failed
         address_failure_note = ""
-        if target_field == "address" and state.get("address_validation_failed"):
-            last_addr = state.get("last_attempted_address", "the address you gave")
+        if target_field == "address" and _dm_get(state, "address_validation_failed", False):
+            last_addr = _dm_get(state, "last_attempted_address", "the address you gave")
             address_failure_note = (
                 f"IMPORTANT: The user previously gave the address '{last_addr}' but we could not "
                 f"verify it against UK records. Politely explain this and ask them to try their "
@@ -1287,6 +1287,8 @@ def handle_ui_action(state: AgentState):
     selection = dict(state.get("selection", {}))
 
     if action_id == "reset_flow":
+        _dm(state)["address_validation_failed"] = False
+        _dm(state)["last_attempted_address"] = None
         return {
             "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None, "annualIncome": None},
             "selection": {},
@@ -1296,8 +1298,7 @@ def handle_ui_action(state: AgentState):
             "transcript": "",
             "existing_customer": None,
             "property_seen": None,
-            "address_validation_failed": False,
-            "last_attempted_address": None,
+            "domain": state.get("domain", {}),
         }
     elif action_id == "select_category":
         category = data.get("category")

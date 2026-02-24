@@ -44,6 +44,8 @@ class MortgagePlugin(PluginBase):
             "domain": {
                 "mortgage": {
                     "branch_requested": False,
+                    "address_validation_failed": False,
+                    "last_attempted_address": None,
                 },
             },
             "state_version": self.state_version,
@@ -61,8 +63,6 @@ class MortgagePlugin(PluginBase):
             "property_seen": None,
             "trouble_count": 0,
             "show_support": False,
-            "address_validation_failed": False,
-            "last_attempted_address": None,
             "process_question": None,
         }
 
