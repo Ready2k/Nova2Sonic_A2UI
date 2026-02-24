@@ -12,7 +12,14 @@ load_dotenv()
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from .models import WebSocketMessage, ActionPayload
-from .agent.graph import app_graph, AgentState
+from .agent.core.contracts import PluginBase
+from .agent.core.registry import register, get_plugin
+from .agent.core.runtime_adapter import invoke_graph
+from .agent.plugins.mortgage.plugin import MortgagePlugin
+
+# Register all plugins at startup.
+# Add new plugins here when created in Phase 2.
+register(MortgagePlugin())
 from .nova_sonic import NovaSonicSession
 from .langfuse_util import get_langfuse_callback
 
@@ -35,29 +42,8 @@ app.add_middleware(
 
 sessions: Dict[str, dict] = {}
 
-def create_initial_state() -> AgentState:
-    return {
-        "mode": "text",
-        "device": "desktop",
-        "transcript": "",
-        "messages": [],
-        "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25},
-        "ltv": 0.0,
-        "products": [],
-        "selection": {},
-        "ui": {"surfaceId": "main", "state": "LOADING"},
-        "errors": None,
-        "pendingAction": None,
-        "outbox": [],
-        "existing_customer": None,
-        "property_seen": None,
-        "trouble_count": 0,
-        "show_support": False,
-        "address_validation_failed": False,
-        "last_attempted_address": None,
-        "branch_requested": False,
-        "process_question": None,
-    }
+# Initial state is now owned by each plugin via plugin.create_initial_state().
+# See plugins/mortgage/plugin.py and plugins/lost_card/plugin.py.
 
 async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload: dict = None):
     try:
@@ -210,13 +196,23 @@ async def process_outbox(websocket: WebSocket, sid: str):
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
+    # Validate agent_id before accepting so we can reject with a close code.
+    try:
+        plugin = get_plugin(agent)
+    except KeyError as exc:
+        await websocket.accept()
+        await websocket.close(code=4000, reason=str(exc))
+        logger.error("[WebSocket] Unknown agent_id=%r, closing with 4000", agent)
+        return
+
     await websocket.accept()
     session_id = f"sess_{id(websocket)}"
-    logger.info(f"[WebSocket] New connection: {session_id}")
-    
+    logger.info("[WebSocket] New connection: %s (agent=%s)", session_id, agent)
+
     sessions[session_id] = {
-        "state": create_initial_state(),
+        "agent_id": agent,
+        "state": plugin.create_initial_state(),
         "voice_playing": False,
         "tts_task": None,
         "sonic": None,
@@ -234,7 +230,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "callbacks": [lf_callback],
             "metadata": {"langfuse_session_id": session_id}
         }
-        initial_res = await asyncio.to_thread(app_graph.invoke, sessions[session_id]["state"], config)
+        initial_res = await invoke_graph(plugin, sessions[session_id]["state"], config)
         # Suppress any voice on initial load to avoid double-audio from React StrictMode remounts
         initial_res["outbox"] = [e for e in initial_res.get("outbox", []) if e["type"] != "server.voice.say"]
         sessions[session_id]["state"] = initial_res
@@ -256,7 +252,7 @@ async def websocket_endpoint(websocket: WebSocket):
             session_data = sessions.get(sid)
             if not session_data: continue
             
-            state: AgentState = session_data["state"]
+            state = session_data["state"]
 
             if msg_type in ["client.audio.start", "client.audio.stop"]:
                 logger.info(f"--- Received '{msg_type}' from {sid} ---")
@@ -314,7 +310,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "callbacks": [lf_callback],
                             "metadata": {"langfuse_session_id": sid}
                         }
-                        res = await asyncio.to_thread(app_graph.invoke, current_state, config)
+                        _plugin = get_plugin(session_data.get("agent_id", "mortgage"))
+                        res = await invoke_graph(_plugin, current_state, config)
                         if sid in sessions:
                             sessions[sid]["state"] = res
                         await process_outbox(websocket, sid)
@@ -413,7 +410,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "callbacks": [lf_callback],
                         "metadata": {"langfuse_session_id": sid}
                     }
-                    res = await asyncio.to_thread(app_graph.invoke, state, config)
+                    _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
+                    res = await invoke_graph(_plugin, state, config)
                     if sid in sessions:
                         sessions[sid]["state"] = res
                     await process_outbox(websocket, sid)
@@ -440,7 +438,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "callbacks": [lf_callback],
                             "metadata": {"langfuse_session_id": sid}
                         }
-                        res = await asyncio.to_thread(app_graph.invoke, current_state, config)
+                        _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
+                        res = await invoke_graph(_plugin, current_state, config)
                         if sid in sessions:
                             sessions[sid]["state"] = res
                         await process_outbox(websocket, sid)
@@ -465,23 +464,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 if new_device:
                     state["device"] = new_device
 
-                # If the device changed, push a new UI update immediately
+                # If the device changed, re-render the current screen via a full graph invoke.
                 if new_device and new_device != old_device:
-                    from app.agent.graph import render_missing_inputs, render_products_a2ui
-                    
-                    # Determine which rendering logic to use based on current progress
-                    intent = state.get("intent", {})
-                    if intent.get("category") and state.get("products"):
-                        update = render_products_a2ui(state)
-                    else:
-                        update = render_missing_inputs(state)
-                    
-                    # Extract outbox items and send them
-                    if "outbox" in update:
-                        for item in update["outbox"]:
-                            await websocket.send_json(item)
-                        # Sync state updates back to session
-                        state.update({k: v for k, v in update.items() if k != "outbox"})
+                    # Clear transcript and pendingAction so start_router does not
+                    # re-interpret the last user message — we only want a re-render.
+                    state["transcript"] = ""
+                    state["pendingAction"] = None
+                    lf_callback = get_langfuse_callback()
+                    config = {
+                        "callbacks": [lf_callback],
+                        "metadata": {"langfuse_session_id": sid},
+                    }
+                    _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
+                    try:
+                        res = await invoke_graph(_plugin, state, config)
+                        sessions[sid]["state"] = res
+                        await process_outbox(websocket, sid)
+                    except Exception as e:
+                        logger.error("Error re-rendering on device change: %s", e)
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")
