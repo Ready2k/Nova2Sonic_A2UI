@@ -8,7 +8,11 @@ import LatencyHud from '../components/LatencyHud';
 import { langfuse } from '../lib/langfuse';
 
 export default function Home() {
-  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
+  const [agentParam, setAgentParam] = useState('mortgage');
+  useEffect(() => {
+    setAgentParam(new URLSearchParams(window.location.search).get('agent') || 'mortgage');
+  }, []);
+  const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws"}?agent=${agentParam}`;
   const {
     connected,
     messages,
@@ -274,7 +278,9 @@ export default function Home() {
           <div className="w-10 h-10 bg-blue-600 rounded-xl shadow-md flex items-center justify-center">
             <span className="text-white font-black text-lg">B</span>
           </div>
-          <h1 className="font-extrabold text-2xl tracking-tight text-blue-950">Mortgage Assistant</h1>
+          <h1 className="font-extrabold text-2xl tracking-tight text-blue-950">
+            {agentParam === 'lost_card' ? 'Lost Card Assistant' : 'Mortgage Assistant'}
+          </h1>
         </div>
         <div className="flex items-center gap-4">
           <div className="flex bg-gray-100 rounded-lg p-1.5 shadow-inner">
@@ -414,7 +420,9 @@ export default function Home() {
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-black text-sm">B</div>
                       <div>
-                        <h2 className="text-sm font-black text-blue-950 leading-none">Mortgage</h2>
+                        <h2 className="text-sm font-black text-blue-950 leading-none">
+                          {agentParam === 'lost_card' ? 'Lost Card' : 'Mortgage'}
+                        </h2>
                         <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Assistant AI</p>
                       </div>
                     </div>
