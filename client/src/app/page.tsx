@@ -1,14 +1,25 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useMortgageSocket } from '../hooks/useMortgageSocket';
-import A2Renderer, { A2UIPayload } from '../components/A2Renderer';
+import A2Renderer from '../components/A2Renderer';
 import LatencyHud from '../components/LatencyHud';
 import { langfuse } from '../lib/langfuse';
 
+function formatAgentName(id: string): string {
+  return id.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
 export default function Home() {
-  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
+  const searchParams = useSearchParams();
+  const agentParam = searchParams.get('agent') ?? 'mortgage';
+  const [availableAgents, setAvailableAgents] = useState<string[]>([]);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const agentsDropdownRef = useRef<HTMLDivElement>(null);
+  const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws"}?agent=${agentParam}`;
   const {
     connected,
     messages,
@@ -91,12 +102,29 @@ export default function Home() {
       panel.removeEventListener('scroll', updateChatPosition);
       window.removeEventListener('resize', updateChatPosition);
     };
-  }, [a2uiState, messages]);
+  }, [a2uiState, messages, isMobile]);
 
   useEffect(() => {
     // Scroll to bottom of message log when new message is added
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    fetch('/api/import-agent/plugins')
+      .then(r => r.json())
+      .then(d => setAvailableAgents(d.plugins || []))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (agentsDropdownRef.current && !agentsDropdownRef.current.contains(e.target as Node)) {
+        setAgentsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -274,9 +302,64 @@ export default function Home() {
           <div className="w-10 h-10 bg-blue-600 rounded-xl shadow-md flex items-center justify-center">
             <span className="text-white font-black text-lg">B</span>
           </div>
-          <h1 className="font-extrabold text-2xl tracking-tight text-blue-950">Mortgage Assistant</h1>
+          <h1 className="font-extrabold text-2xl tracking-tight text-blue-950">
+            {formatAgentName(agentParam)} Assistant
+          </h1>
+          {/* Agents switcher dropdown */}
+          <div className="relative" ref={agentsDropdownRef}>
+            <button
+              onClick={() => setAgentsOpen(o => !o)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors border border-gray-200"
+            >
+              Agents
+              <svg className={`w-3 h-3 transition-transform duration-150 ${agentsOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {agentsOpen && (
+              <div className="absolute top-full left-0 mt-1.5 bg-white rounded-xl shadow-xl border border-gray-200 py-1.5 z-50 min-w-[180px]">
+                {availableAgents.length === 0 ? (
+                  <p className="px-4 py-2 text-xs text-gray-400">No agents found</p>
+                ) : availableAgents.map(id => (
+                  <Link
+                    key={id}
+                    href={`/?agent=${id}`}
+                    onClick={() => setAgentsOpen(false)}
+                    className={`flex items-center gap-2.5 px-4 py-2.5 text-sm transition-colors hover:bg-gray-50 ${agentParam === id ? 'text-blue-700 font-bold' : 'text-gray-700 font-medium'}`}
+                  >
+                    {agentParam === id
+                      ? <svg className="w-3.5 h-3.5 text-blue-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                      : <div className="w-3.5 h-3.5 flex-shrink-0" />
+                    }
+                    {formatAgentName(id)}
+                  </Link>
+                ))}
+                <div className="border-t border-gray-100 mt-1 pt-1">
+                  <Link
+                    href="/transfer"
+                    onClick={() => setAgentsOpen(false)}
+                    className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-gray-500 font-medium hover:bg-gray-50 transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                    Import agent…
+                  </Link>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-4">
+          {/* Transfer / Import link */}
+          <Link
+            href="/transfer"
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-gray-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors border border-gray-200"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+            Import
+          </Link>
+
+          <div className="w-px h-6 bg-gray-200"></div>
+
           <div className="flex bg-gray-100 rounded-lg p-1.5 shadow-inner">
             <button
               className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${!isMobile ? 'bg-white text-blue-700 shadow-sm ring-1 ring-gray-200' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-200/50'}`}
@@ -414,16 +497,20 @@ export default function Home() {
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-black text-sm">B</div>
                       <div>
-                        <h2 className="text-sm font-black text-blue-950 leading-none">Mortgage</h2>
+                        <h2 className="text-sm font-black text-blue-950 leading-none">
+                          {agentParam === 'lost_card' ? 'Lost Card' : 'Mortgage'}
+                        </h2>
                         <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Assistant AI</p>
                       </div>
                     </div>
                     {/* Barclays Eagle Logo for existing customers */}
                     {a2uiState?.isExistingCustomer && (
                       <div className="w-8 h-8 flex items-center justify-center animate-in fade-in zoom-in duration-500">
-                        <img
+                        <Image
                           src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAMAAABF0y+mAAAAM1BMVEVHcEwAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+lRZTNJAAAAEXRSTlMAPIejVCr/ZK/Yyue/95UZeLE8H+YAAACjSURBVHgBrc5bisQgFEXRY9RtfGf+o23aRJAuG4qi1u/lbK6+whzWac/zK2jLmwM49eKIyUjKUCSFmJZABJBUIT/9pkfg7hkAPwLQ12FulqG1uk7ZyRo8WxrMx0fP1hsPKbNx6tbYcLp1IFIig61EQFPhKnhu0XElLk09iSvw6KkqamGLmJKq08rphCnISCvDQn8Fpur1oicGqy2TwHb9p+t9P78sCiCxm+C+AAAAAElFTkSuQmCC"
                           alt="Barclays Eagle"
+                          width={24}
+                          height={24}
                           className="w-6 h-6 object-contain"
                         />
                       </div>

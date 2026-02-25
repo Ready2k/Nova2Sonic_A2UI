@@ -1,5 +1,5 @@
 import math
-from app.agent.tools import calculate_ltv, recalculate_monthly_payment, fetch_mortgage_products
+from app.agent.plugins.mortgage.tools import calculate_ltv, recalculate_monthly_payment, fetch_mortgage_products
 
 def test_calculate_ltv():
     assert calculate_ltv(400000, 250000) == 62.5

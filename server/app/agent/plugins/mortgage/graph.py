@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Asset directory: override with ASSETS_DIR env var (set in Docker to /assets).
 # Falls back to the repository root resolved relative to this file's location.
-_ASSETS_DIR = os.getenv("ASSETS_DIR", str(Path(__file__).resolve().parents[3]))
+_ASSETS_DIR = os.getenv("ASSETS_DIR", str(Path(__file__).resolve().parents[5]))
 
 def append_reducer(a: list, b: list) -> list:
     return a + b
@@ -213,29 +213,53 @@ def _answer_process_question(question: str, intent: dict, current_stage: str) ->
         return _faq_fallback(question)
 
 
+# ── Domain state accessors ─────────────────────────────────────────────────────
+# These provide backward-compatible reads during the Phase 3 migration.
+# Once all top-level fields are removed, these can be inlined or deleted.
+
+def _dm(state: dict) -> dict:
+    """Return the mortgage domain sub-dict, creating it if absent."""
+    domain = state.setdefault("domain", {})
+    if "mortgage" not in domain:
+        domain["mortgage"] = {}
+    return domain["mortgage"]
+
+
+def _dm_get(state: dict, key: str, default=None):
+    """
+    Read a field from domain.mortgage with fallback to top-level key.
+    Supports the dual-write window where both paths may exist.
+    """
+    dm = state.get("domain", {}).get("mortgage", {})
+    if key in dm:
+        return dm[key]
+    return state.get(key, default)
+
+
+def _intent(state: dict) -> dict:
+    """
+    Return the intent dict, reading from domain.mortgage.intent with
+    fallback to top-level state['intent'].
+    """
+    dm = state.get("domain", {}).get("mortgage", {})
+    if "intent" in dm:
+        return dm["intent"]
+    return state.get("intent", {})
+
+
 # ─── Agent State ───────────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
+    # ── CommonState envelope (shared with all plugins) ───────────────────
     mode: str
     device: str
     transcript: str
     messages: Annotated[List[Dict[str, Any]], append_reducer]
-    intent: Dict[str, Any]
-    ltv: float
-    products: List[Dict[str, Any]]
-    selection: Dict[str, Any]
     ui: Dict[str, Any]
     errors: Optional[Dict[str, Any]]
     pendingAction: Optional[Dict[str, Any]]
     outbox: Annotated[List[Dict[str, Any]], append_reducer]
-    existing_customer: Optional[bool]
-    property_seen: Optional[bool]
-    trouble_count: int
-    show_support: bool
-    address_validation_failed: bool        # True when last geocoding attempt found nothing
-    last_attempted_address: Optional[str]  # The address string that failed validation
-    branch_requested: bool                 # User asked to find their nearest Barclays branch
-    process_question: Optional[str]        # A question about the mortgage process that needs answering
+    domain: Dict[str, Any]                 # All mortgage domain data under domain["mortgage"]
 
 
 # ─── Intent model ─────────────────────────────────────────────────────────────
@@ -267,12 +291,12 @@ def ingest_input(state: AgentState):
 def interpret_intent(state: AgentState):
     transcript = state.get("transcript", "").strip()
     logger.info(f"NODE: interpret_intent - input='{transcript}'")
-    intent = state.get("intent", {}) or {}
+    intent = _intent(state) or {}
     messages = state.get("messages", [])
 
     # Carry forward existing validation state
-    address_validation_failed = state.get("address_validation_failed", False)
-    last_attempted_address = state.get("last_attempted_address")
+    address_validation_failed = _dm_get(state, "address_validation_failed", False)
+    last_attempted_address = _dm_get(state, "last_attempted_address")
 
     # Determine what question was last asked (so we can interpret short answers like "yes" correctly)
     last_question_context = ""
@@ -427,7 +451,7 @@ def interpret_intent(state: AgentState):
         logger.info(f"Process question detected: '{process_question}'")
 
     # ── Trouble counting ──────────────────────────────────────────────────────
-    new_trouble_count = state.get("trouble_count", 0)
+    new_trouble_count = _dm_get(state, "trouble_count", 0)
 
     if not transcript:
         new_trouble_count += 1
@@ -460,21 +484,30 @@ def interpret_intent(state: AgentState):
     show_support = new_trouble_count >= 2
     logger.info(f"Trouble State: count={new_trouble_count}, show_support={show_support}, transcript='{transcript}'")
 
+    _dm(state)["branch_requested"] = branch_requested
+    _dm(state)["address_validation_failed"] = address_validation_failed
+    _dm(state)["last_attempted_address"] = last_attempted_address
+    _dm(state)["trouble_count"] = new_trouble_count
+    _dm(state)["show_support"] = show_support
+    _dm(state)["existing_customer"] = new_intent.get("existingCustomer")
+    _dm(state)["property_seen"] = new_intent.get("propertySeen")
+    _dm(state)["process_question"] = process_question
+    _dm(state)["last_question_context"] = last_question_context
+    _dm(state)["intent"] = new_intent
+
+    # ── Lost Card detection (Handoff trigger) ──────────────────────────────────
+    lost_card_keywords = ["lost card", "stolen card", "freeze my card", "lost my card", "stolen my card"]
+    if any(kw in transcript.lower() for kw in lost_card_keywords):
+        logger.info("Lost card intent detected in Mortgage agent. Preparing handoff.")
+        _dm(state)["handoff_requested"] = "lost_card"
+
     return {
-        "intent": new_intent,
-        "existing_customer": new_intent.get("existingCustomer"),
-        "property_seen": new_intent.get("propertySeen"),
-        "trouble_count": new_trouble_count,
-        "show_support": show_support,
-        "address_validation_failed": address_validation_failed,
-        "last_attempted_address": last_attempted_address,
-        "branch_requested": branch_requested,
-        "process_question": process_question,
+        "domain": state.get("domain", {}),
     }
 
 
 def render_missing_inputs(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     missing = []
 
     category = intent.get("category")
@@ -517,7 +550,7 @@ def render_missing_inputs(state: AgentState):
 
     # ── Answer any process question first ────────────────────────────────────
     faq_answer_text = None
-    faq_question_text = state.get("process_question")
+    faq_question_text = _dm_get(state, "process_question")
     if faq_question_text:
         ui_stage = state.get("ui", {}).get("state", "data collection")
         faq_answer_text = _answer_process_question(faq_question_text, intent, ui_stage)
@@ -525,7 +558,7 @@ def render_missing_inputs(state: AgentState):
         new_outbox.append({"type": "server.voice.say", "payload": {"text": faq_answer_text}})
         new_messages.append({"role": "assistant", "text": faq_answer_text})
 
-    category_val = state.get("intent", {}).get("category")
+    category_val = _intent(state).get("category")
     category_label = category_val if category_val else "a mortgage"
     just_selected = state.get("pendingAction", {}) and state.get("pendingAction", {}).get("data", {}).get("action") == "select_category"
 
@@ -536,8 +569,8 @@ def render_missing_inputs(state: AgentState):
 
         # Build extra context for the LLM when an address attempt failed
         address_failure_note = ""
-        if target_field == "address" and state.get("address_validation_failed"):
-            last_addr = state.get("last_attempted_address", "the address you gave")
+        if target_field == "address" and _dm_get(state, "address_validation_failed", False):
+            last_addr = _dm_get(state, "last_attempted_address", "the address you gave")
             address_failure_note = (
                 f"IMPORTANT: The user previously gave the address '{last_addr}' but we could not "
                 f"verify it against UK records. Politely explain this and ask them to try their "
@@ -620,11 +653,17 @@ def render_missing_inputs(state: AgentState):
 
         new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
         new_messages.append({"role": "assistant", "text": msg})
+        
+        # Store context for STT biasing
+        ctx = f"The user is being asked about their {target_field}. " + \
+              ("They might be saying 'yes', 'no', or providing a value." if target_field in ["existingCustomer", "propertySeen"] else "")
+        _dm(state)["last_question_context"] = ctx
+        logger.info(f"Setting STT context: {ctx}")
 
     # ── Branch request handling ───────────────────────────────────────────────
     branch_outbox_items = []
     branch_components = []
-    if state.get("branch_requested"):
+    if _dm_get(state, "branch_requested", False):
         lat = intent.get("lat")
         lng = intent.get("lng")
         if lat and lng:
@@ -671,7 +710,7 @@ def render_missing_inputs(state: AgentState):
                 "payload": {"text": "Once you share your property address, I can find your nearest Barclays branch!"},
             })
 
-    intent = state.get("intent", {})
+    intent = _intent(state)
     category = intent.get("category")
 
     if not category:
@@ -680,17 +719,35 @@ def render_missing_inputs(state: AgentState):
             with open(os.path.join(_ASSETS_DIR, "remortgage_b64.txt"), "r") as f: remortgage_icon = f.read().strip()
             with open(os.path.join(_ASSETS_DIR, "btl_b64.txt"), "r") as f: btl_icon = f.read().strip()
             with open(os.path.join(_ASSETS_DIR, "moving_b64.txt"), "r") as f: moving_icon = f.read().strip()
+            # Default fallback for lost card if no b64 file exists
+            try:
+                with open(os.path.join(_ASSETS_DIR, "lost_card_b64.txt"), "r") as f: lost_card_icon = f.read().strip()
+            except:
+                lost_card_icon = "" 
         except:
-            ftb_icon = remortgage_icon = btl_icon = moving_icon = ""
+            ftb_icon = remortgage_icon = btl_icon = moving_icon = lost_card_icon = ""
 
         device = state.get("device", "desktop")
         
         if device == "mobile":
             components = [
                 {"id": "root", "component": "Column", "children": ["header", "options_list"]},
-                {"id": "header", "component": "Text", "text": "Mortgage Options", "variant": "h2"},
-                {"id": "options_list", "component": "Column", "children": ["opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
+                {"id": "header", "component": "Text", "text": "Barclays Services", "variant": "h2"},
+                {"id": "options_list", "component": "Column", "children": ["opt_lost_card", "opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
                 
+                {
+                    "id": "opt_lost_card", 
+                    "component": "ListItem", 
+                    "text": "Card Services", 
+                    "data": {
+                        "number": "00",
+                        "subtext": "Lost or stolen card?",
+                        "rightText": "URGENT",
+                        "url": f"data:image/png;base64,{lost_card_icon}",
+                        "action": "lost_card.start", 
+                        "category": "Lost Card"
+                    }
+                },
                 {
                     "id": "opt_ftb", 
                     "component": "ListItem", 
@@ -753,10 +810,16 @@ def render_missing_inputs(state: AgentState):
         else:
             components = [
                 {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
-                {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
-                {"id": "options_grid", "component": "Column", "children": ["row_1", "row_2"]},
+                {"id": "header", "component": "Text", "text": "How can we help today?", "variant": "h2"},
+                {"id": "options_grid", "component": "Column", "children": ["row_0", "row_1", "row_2"]},
+                {"id": "row_0", "component": "Row", "children": ["opt_lost_card"]},
                 {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
                 {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
+                
+                {"id": "opt_lost_card", "component": "Column", "children": ["img_lost_card", "btn_lost_card"]},
+                {"id": "img_lost_card", "component": "Image", "data": {"url": f"data:image/png;base64,{lost_card_icon}"}, "text": "Lost Card"},
+                {"id": "btn_lost_card", "component": "Button", "text": "Report Lost or Stolen Card", "data": {"action": "lost_card.start"}},
+
                 {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
                 {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
                 {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
@@ -775,7 +838,9 @@ def render_missing_inputs(state: AgentState):
         new_outbox.extend(branch_outbox_items)
         ui_state = dict(state.get("ui", {}))
         ui_state["state"] = "LOADING"
-        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "branch_requested": False, "process_question": None}
+        _dm(state)["branch_requested"] = False
+        _dm(state)["process_question"] = None
+        return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": "", "domain": state.get("domain", {})}
 
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
@@ -959,25 +1024,28 @@ def render_missing_inputs(state: AgentState):
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "LOADING"
 
+    _dm(state)["branch_requested"] = False
+    _dm(state)["process_question"] = None
+    _dm(state)["intent"] = intent
     return {
         "outbox": new_outbox,
         "ui": ui_state,
         "messages": new_messages,
         "transcript": "",
-        "intent": intent,
-        "branch_requested": False,
-        "process_question": None,
+        "domain": state.get("domain", {}),
     }
 
 
 def call_mortgage_tools(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     pv = intent.get("propertyValue")
     lb = intent.get("loanBalance")
     fy = intent.get("fixYears")
 
     if pv is None or lb is None:
-        return {"ltv": 0.0, "products": []}
+        _dm(state)["ltv"] = 0.0
+        _dm(state)["products"] = []
+        return {"domain": state.get("domain", {})}
 
     ltv = calculate_ltv(pv, lb)
     products = fetch_mortgage_products(ltv, fy or 5)
@@ -987,19 +1055,21 @@ def call_mortgage_tools(state: AgentState):
         calc = recalculate_monthly_payment(lb, p["rate"], ty, p["fee"])
         p.update(calc)
 
-    return {"ltv": ltv, "products": products}
+    _dm(state)["ltv"] = ltv
+    _dm(state)["products"] = products
+    return {"domain": state.get("domain", {})}
 
 
 def render_products_a2ui(state: AgentState):
-    ltv = state.get("ltv", 0)
-    products = state.get("products", [])
-    intent = state.get("intent", {})
+    ltv = _dm_get(state, "ltv", 0)
+    products = _dm_get(state, "products", [])
+    intent = _intent(state)
     new_outbox = []
     new_messages = []
 
     # ── Answer any process question first ────────────────────────────────────
     products_faq_answer = None
-    products_faq_question = state.get("process_question")
+    products_faq_question = _dm_get(state, "process_question")
     if products_faq_question:
         products_faq_answer = _answer_process_question(products_faq_question, intent, "product comparison")
         logger.info(f"Answering process question (products): '{products_faq_question}' -> '{products_faq_answer[:80]}...'")
@@ -1091,7 +1161,7 @@ def render_products_a2ui(state: AgentState):
         })
 
     # ── Branch request handling ───────────────────────────────────────────────
-    if state.get("branch_requested"):
+    if _dm_get(state, "branch_requested", False):
         lat = intent.get("lat")
         lng = intent.get("lng")
         if lat and lng:
@@ -1173,9 +1243,9 @@ def render_products_a2ui(state: AgentState):
                 "- Stay professional and helpful."
             )
 
-            user_msg = f"User Intent: {state.get('intent')}\n"
+            user_msg = f"User Intent: {_intent(state)}\n"
             user_msg += f"Calculated LTV: {ltv}%\n"
-            user_msg += f"Requested Fix Years: {state.get('intent', {}).get('fixYears')}\n"
+            user_msg += f"Requested Fix Years: {_intent(state).get('fixYears')}\n"
             user_msg += f"Found Products: {[{'name': p['name'], 'years': p.get('years'), 'rate': p['rate']} for p in products]}\n"
 
             response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
@@ -1192,9 +1262,9 @@ def render_products_a2ui(state: AgentState):
 
         except Exception as e:
             logger.error(f"LLM product intro generation error: {e}")
-            msg = f"Based on a {ltv}% LTV, I've found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."
+            msg = f"Based on a {ltv}% LTV, I've found some {_intent(state).get('fixYears', 5)}-year options for you."
     else:
-        msg = f"Based on a {ltv}% LTV, I've found some {state.get('intent', {}).get('fixYears', 5)}-year options for you."
+        msg = f"Based on a {ltv}% LTV, I've found some {_intent(state).get('fixYears', 5)}-year options for you."
 
     if state.get("ui", {}).get("state") != "COMPARISON":
         new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
@@ -1203,20 +1273,21 @@ def render_products_a2ui(state: AgentState):
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
 
+    _dm(state)["branch_requested"] = False
+    _dm(state)["process_question"] = None
     return {
         "outbox": new_outbox,
         "ui": ui_state,
         "messages": new_messages,
         "transcript": "",
-        "branch_requested": False,
-        "process_question": None,
+        "domain": state.get("domain", {}),
     }
 
 
 def recalculate_and_patch(state: AgentState):
-    intent = state.get("intent", {})
+    intent = _intent(state)
     lb = intent.get("loanBalance")
-    products = state.get("products", [])
+    products = _dm_get(state, "products", [])
     ty = intent.get("termYears", 25)
 
     new_outbox = []
@@ -1241,7 +1312,8 @@ def recalculate_and_patch(state: AgentState):
     ui_state = dict(state.get("ui", {}))
     ui_state["state"] = "COMPARISON"
 
-    return {"outbox": new_outbox, "ui": ui_state, "products": products, "transcript": ""}
+    _dm(state)["products"] = products
+    return {"outbox": new_outbox, "ui": ui_state, "domain": state.get("domain", {}), "transcript": ""}
 
 
 def handle_ui_action(state: AgentState):
@@ -1254,36 +1326,42 @@ def handle_ui_action(state: AgentState):
     if isinstance(data, dict) and data.get("action"):
         action_id = data.get("action")
 
-    intent = dict(state.get("intent", {}))
-    selection = dict(state.get("selection", {}))
+    intent = dict(_intent(state))
+    selection = dict(_dm_get(state, "selection", {}))
 
     if action_id == "reset_flow":
+        _dm(state)["address_validation_failed"] = False
+        _dm(state)["last_attempted_address"] = None
+        _dm(state)["existing_customer"] = None
+        _dm(state)["property_seen"] = None
+        _dm(state)["intent"] = {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None, "annualIncome": None}
+        _dm(state)["selection"] = {}
+        _dm(state)["products"] = []
+        _dm(state)["ltv"] = 0.0
         return {
-            "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25, "category": None, "annualIncome": None},
-            "selection": {},
-            "products": [],
-            "ltv": 0.0,
             "errors": None,
             "transcript": "",
-            "existing_customer": None,
-            "property_seen": None,
-            "address_validation_failed": False,
-            "last_attempted_address": None,
+            "domain": state.get("domain", {}),
         }
     elif action_id == "select_category":
         category = data.get("category")
         intent["category"] = category
-        return {"intent": intent}
+        _dm(state)["intent"] = intent
+        return {"domain": state.get("domain", {})}
     elif action_id == "update_term":
         intent["termYears"] = data.get("termYears", intent.get("termYears", 25))
         selection["termYears"] = intent["termYears"]
-        return {"intent": intent, "selection": selection}
+        _dm(state)["intent"] = intent
+        _dm(state)["selection"] = selection
+        return {"domain": state.get("domain", {})}
     elif action_id == "select_product":
         selection["productId"] = data.get("productId")
-        return {"selection": selection}
+        _dm(state)["selection"] = selection
+        return {"domain": state.get("domain", {})}
     elif action_id == "confirm_application":
         selection["confirmed"] = True
-        return {"selection": selection}
+        _dm(state)["selection"] = selection
+        return {"domain": state.get("domain", {})}
 
     return {}
 
@@ -1293,16 +1371,16 @@ def clear_pending_action(state: AgentState):
 
 
 def render_summary_a2ui(state: AgentState):
-    selection = state.get("selection", {})
+    selection = _dm_get(state, "selection", {})
     product_id = selection.get("productId")
-    products = state.get("products", [])
+    products = _dm_get(state, "products", [])
     selected_prod = next((p for p in products if p["id"] == product_id), None)
     chosen = selected_prod or (products[0] if products else {})
     new_outbox = []
     new_messages = []
 
     monthly = chosen.get("monthlyPayment", 0)
-    ty = state.get("intent", {}).get("termYears", 25)
+    ty = _intent(state).get("termYears", 25)
 
     components = [
         {"id": "root", "component": "Column", "children": [
@@ -1386,6 +1464,21 @@ def confirm_application(state: AgentState):
     return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
 
 
+def handoff_to_lost_card(state: AgentState):
+    """Transition the session to the Lost Card plugin."""
+    new_outbox = [
+        {
+            "type": "server.internal.handoff",
+            "payload": {"agent_id": "lost_card"}
+        }
+    ]
+    # Small bridging message
+    msg = "I'll hand you over to our card services team right away to help you with that."
+    new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+    
+    return {"outbox": new_outbox, "transcript": "", "pendingAction": None}
+
+
 # ─── Routers ──────────────────────────────────────────────────────────────────
 
 def _all_required_fields_present(intent: dict) -> bool:
@@ -1422,7 +1515,7 @@ def root_router(state: AgentState):
     if state.get("pendingAction"):
         return "handle_ui_action"
 
-    intent = state.get("intent", {})
+    intent = _intent(state)
     if not _all_required_fields_present(intent):
         return "render_missing_inputs"
 
@@ -1443,6 +1536,8 @@ def ui_action_router(state: AgentState):
         return "render_summary_a2ui"
     elif action_id == "confirm_application":
         return "confirm_application"
+    elif action_id == "lost_card.start":
+        return "handoff_to_lost_card"
     elif action_id in ("reset_flow", "select_category"):
         return "render_missing_inputs"
     return "clear_pending_action"
@@ -1454,14 +1549,16 @@ def start_router(state: AgentState):
     if state.get("transcript"):
         return "interpret_intent"
 
-    intent = state.get("intent", {})
+    intent = _intent(state)
     if not intent.get("category") or not _all_required_fields_present(intent):
         return "render_missing_inputs"
     return "call_mortgage_tools"
 
 
 def intent_router(state: AgentState):
-    intent = state.get("intent", {})
+    if _dm_get(state, "handoff_requested") == "lost_card":
+        return "handoff_to_lost_card"
+    intent = _intent(state)
     if not _all_required_fields_present(intent):
         return "render_missing_inputs"
     return "call_mortgage_tools"
@@ -1480,6 +1577,7 @@ workflow.add_node("handle_ui_action", handle_ui_action)
 workflow.add_node("recalculate_and_patch", recalculate_and_patch)
 workflow.add_node("render_summary_a2ui", render_summary_a2ui)
 workflow.add_node("confirm_application", confirm_application)
+workflow.add_node("handoff_to_lost_card", handoff_to_lost_card)
 workflow.add_node("clear_pending_action", clear_pending_action)
 
 workflow.add_edge(START, "ingest_input")
@@ -1496,6 +1594,7 @@ workflow.add_conditional_edges("handle_ui_action", ui_action_router)
 workflow.add_edge("recalculate_and_patch", "clear_pending_action")
 workflow.add_edge("render_summary_a2ui", "clear_pending_action")
 workflow.add_edge("confirm_application", "clear_pending_action")
+workflow.add_edge("handoff_to_lost_card", END)
 
 workflow.add_edge("clear_pending_action", END)
 

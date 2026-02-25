@@ -22,26 +22,40 @@ class NovaSonicSession:
         self._is_processing  = False
         self.proc            = None
         self.reader_task     = None
+        self._audio_buffer   = []
 
     async def start_session(self, system_prompt: str = None):
         logger.info("Nova Sonic: session started")
         self.is_active      = True
         self._is_processing = False
 
-    async def start_audio_input(self):
+    async def start_audio_input(self, system_prompt: str = None):
         if not self.is_active:
             await self.start_session()
         
-        logger.info("Nova Sonic: starting real-time STT process")
+        logger.info(f"Nova Sonic: starting real-time STT process (prompt: {system_prompt[:50] if system_prompt else 'None'}...)")
         try:
+            args = ["node", _STT_SCRIPT]
+            if system_prompt:
+                args.append(system_prompt)
+                
             self.proc = await asyncio.create_subprocess_exec(
-                "node", _STT_SCRIPT,
+                *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             self.reader_task = asyncio.create_task(self._read_stdout())
             self.stderr_task = asyncio.create_task(self._read_stderr())
+            
+            # Flush buffer
+            if self._audio_buffer:
+                logger.info(f"Nova Sonic: flushing {len(self._audio_buffer)} buffered audio chunks")
+                for chunk in self._audio_buffer:
+                    self.proc.stdin.write(f"{chunk}\n".encode())
+                await self.proc.stdin.drain()
+                self._audio_buffer = []
+                
         except Exception as e:
             logger.error(f"Nova Sonic: failed to start STT process: {e}")
             self.is_active = False
@@ -55,6 +69,9 @@ class NovaSonicSession:
                     break
                 
                 decoded = line.decode().strip()
+                if decoded:
+                    logger.info(f"Nova Sonic STT (stdout): {decoded}")
+                
                 if decoded.startswith("TRANSCRIPT_PARTIAL:"):
                     partial = decoded[len("TRANSCRIPT_PARTIAL:"):].strip()
                     if partial and self.on_text_chunk:
@@ -77,13 +94,22 @@ class NovaSonicSession:
                 line = await self.proc.stderr.readline()
                 if not line:
                     break
-                logger.debug(f"Nova Sonic STT (stderr): {line.decode().strip()}")
+                logger.info(f"Nova Sonic STT (stderr): {line.decode().strip()}")
         except Exception as e:
             logger.error(f"Nova Sonic: error in stderr reader: {e}")
 
     async def send_audio_chunk(self, base64_audio: str):
-        if not self.is_active or not self.proc or not self.proc.stdin:
+        if not self.is_active:
             return
+            
+        if not self.proc or not self.proc.stdin:
+            # Buffer chunks while process is starting
+            if hasattr(self, '_audio_buffer'):
+                self._audio_buffer.append(base64_audio)
+                if len(self._audio_buffer) > 100: # Safety cap (~2 seconds of audio)
+                    self._audio_buffer.pop(0)
+            return
+
         try:
             # We must send base64 per chunk as the script uses readline
             self.proc.stdin.write(f"{base64_audio}\n".encode())

@@ -12,18 +12,24 @@ load_dotenv()
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from .models import WebSocketMessage, ActionPayload
-from .agent.graph import app_graph, AgentState
+from .agent.core.registry import get_plugin
+from .agent.core.runtime_adapter import invoke_graph
+from .agent.plugin_loader import load_all_plugins
 from .nova_sonic import NovaSonicSession
 from .langfuse_util import get_langfuse_callback
 
 logging.basicConfig(level=logging.INFO)
 
-
-
-
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Barclays Mortgage Assistant")
+
+# Auto-discover and register all plugins found under app.agent.plugins.
+load_all_plugins()
+
+# Admin / import API
+from .admin import router as admin_router  # noqa: E402
+app.include_router(admin_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,29 +41,8 @@ app.add_middleware(
 
 sessions: Dict[str, dict] = {}
 
-def create_initial_state() -> AgentState:
-    return {
-        "mode": "text",
-        "device": "desktop",
-        "transcript": "",
-        "messages": [],
-        "intent": {"propertyValue": None, "loanBalance": None, "fixYears": None, "termYears": 25},
-        "ltv": 0.0,
-        "products": [],
-        "selection": {},
-        "ui": {"surfaceId": "main", "state": "LOADING"},
-        "errors": None,
-        "pendingAction": None,
-        "outbox": [],
-        "existing_customer": None,
-        "property_seen": None,
-        "trouble_count": 0,
-        "show_support": False,
-        "address_validation_failed": False,
-        "last_attempted_address": None,
-        "branch_requested": False,
-        "process_question": None,
-    }
+# Initial state is now owned by each plugin via plugin.create_initial_state().
+# See plugins/mortgage/plugin.py and plugins/lost_card/plugin.py.
 
 async def send_msg(websocket: WebSocket, session_id: str, msg_type: str, payload: dict = None):
     try:
@@ -102,7 +87,6 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
         await proc.wait()
         await stderr_task
 
-        logger.info(f"[TTS] Process completed, sent {chunk_count} total chunks")
     except Exception as e:
         logger.error(f"TTS fallback failed: {e}")
     finally:
@@ -111,6 +95,116 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
             sessions[session_id]["voice_playing"] = False
         logger.info(f"[TTS] Sending voice.stop for {session_id}")
         await send_msg(websocket, session_id, "server.voice.stop", {})
+
+
+async def start_sonic_stt(websocket: WebSocket, sid: str):
+    """Pre-warms or starts the Nova Sonic STT process."""
+    session_data = sessions.get(sid)
+    if not session_data:
+        return None
+        
+    if session_data.get("sonic"):
+        return session_data["sonic"]
+
+    # Verbatim STT prompt optimized for short mortgage-related responses
+    stt_system_prompt = (
+        "You are a verbatim speech-to-text transcriber for a mortgage assistant. "
+        "Output ONLY the exact words spoken by the user. If they say 'yes', 'no', 'I do', or 'yep', output exactly that. "
+        "Do not add punctuation, do not add commentary, and do not try to fix the user's grammar."
+    )
+
+    async def _on_text_chunk(text, is_user=False, is_final=False):
+        await handle_text_chunk(websocket, sid, text, is_user=True, is_final=is_final)
+
+    async def _handle_finished():
+        await handle_finished_for_sid(websocket, sid)
+
+    sonic = NovaSonicSession(
+        on_audio_chunk=lambda x, **kw: None,
+        on_text_chunk=_on_text_chunk,
+        on_finished=_handle_finished
+    )
+    
+    session_data["sonic"] = sonic
+    session_data["user_transcripts"] = []
+
+    try:
+        await sonic.start_session()
+        await sonic.start_audio_input(system_prompt=stt_system_prompt)
+        return sonic
+    except Exception as e:
+        logger.error(f"Failed to start Nova Sonic session: {e}", exc_info=True)
+        return None
+
+
+async def handle_text_chunk(websocket: WebSocket, sid: str, text: str, is_user=False, is_final=False):
+    session_data = sessions.get(sid)
+    if not session_data: return
+    
+    if is_user:
+        if is_final:
+            logger.info(f"FINAL USER TEXT RECEIVED: {text}")
+            session_data["user_transcripts"] = [text]
+        else:
+            logger.debug(f"APPENDING USER TEXT: {text}")
+            session_data["user_transcripts"].append(text)
+        # Send partial transcript to client for real-time feedback
+        await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
+    else:
+        if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
+        session_data["assist_buffer"].append(text)
+        await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
+
+
+async def handle_finished_for_sid(websocket: WebSocket, sid: str):
+    session_data = sessions.get(sid)
+    if not session_data: return
+    
+    current_state = session_data["state"]
+    if session_data.get("handling_finished"):
+        logger.warning(f"Nova Sonic: handle_finished already in progress for {sid}, skipping duplicate.")
+        return
+    
+    session_data["handling_finished"] = True
+    try:
+        assist_text = "".join(session_data.get("assist_buffer", [])).strip()
+        if assist_text:
+            current_state["messages"].append({"role": "assistant", "text": assist_text})
+            session_data["assist_buffer"] = []
+
+        full_transcript = "".join(session_data["user_transcripts"]).strip()
+        # Continue even if empty to detect silence/trouble
+        session_data["user_transcripts"] = []
+        
+        await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
+        
+        current_state["transcript"] = full_transcript
+        current_state["mode"] = "voice"
+        if full_transcript:
+            current_state["messages"].append({"role": "user", "text": full_transcript})
+        
+        await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
+        
+        try:
+            lf_callback = get_langfuse_callback()
+            config = {
+                "callbacks": [lf_callback],
+                "metadata": {
+                    "langfuse_session_id": sid,
+                    "agent_id": session_data.get("agent_id", "mortgage"),
+                },
+            }
+            _plugin = get_plugin(session_data.get("agent_id", "mortgage"))
+            res = await invoke_graph(_plugin, current_state, config)
+            if sid in sessions:
+                sessions[sid]["state"] = res
+            await process_outbox(websocket, sid)
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in LangGraph matching (voice/finished): {e}")
+            traceback.print_exc()
+    finally:
+        session_data["handling_finished"] = False
 
 
 async def process_outbox(websocket: WebSocket, sid: str):
@@ -136,14 +230,42 @@ async def process_outbox(websocket: WebSocket, sid: str):
         logger.info(f"[process_outbox] Processing {len(outbox)} events, {voice_say_count} voice.say events")
         
         # Pass 1: send ALL non-voice events immediately (a2ui.patch, transcript, etc.)
+        _SKIP_TYPES = {"server.voice.say", "server.audit.event", "server.internal.chain_action"}
         assistant_transcripts_sent = set()
         for event in outbox:
-            if event["type"] != "server.voice.say":
+            if event["type"] not in _SKIP_TYPES:
                 logger.info(f"Emitting from outbox: {event['type']}")
                 payload = event.get("payload", {}) or {}
                 if event["type"] == "server.a2ui.patch":
-                    payload["showSupport"] = state.get("show_support", False)
+                    payload["showSupport"] = (
+                        state.get("domain", {})
+                        .get("mortgage", {})
+                        .get("show_support", False)
+                        or state.get("domain", {})
+                        .get("lost_card", {})
+                        .get("show_support", False)
+                    )
                 await send_msg(websocket, sid, event["type"], payload)
+
+                if event["type"] == "server.internal.handoff":
+                    new_agent_id = payload.get("agent_id")
+                    if new_agent_id:
+                        logger.info(f"--- HANDOFF: Switching session {sid} to agent: {new_agent_id} ---")
+                        try:
+                            new_plugin = get_plugin(new_agent_id)
+                            session_data["agent_id"] = new_agent_id
+                            
+                            # Re-initialize state for the new plugin but keep CommonState envelope items
+                            fresh_state = new_plugin.create_initial_state()
+                            for key in ["mode", "device", "messages", "meta"]:
+                                if key in state:
+                                    fresh_state[key] = state[key]
+                            
+                            # Merge existing messages if any
+                            session_data["state"] = fresh_state
+                            # Important: the current loop continues, but the session is now 're-homed'
+                        except Exception as hex:
+                            logger.error(f"Handoff failed: {hex}")
 
                 if event["type"] == "server.transcript.final":
                     payload = event.get("payload") or {}
@@ -195,9 +317,13 @@ async def process_outbox(websocket: WebSocket, sid: str):
             elif not session_data.get("voice_playing"):
                 logger.info(f"[TTS] Starting TTS for text: {text_to_speak[:40]}")
                 session_data["voice_playing"] = True
-                # Notify client immediately so it shows "Speaking" before first audio chunk
+                # Notify client immediately
                 await send_msg(websocket, sid, "server.voice.start", {})
-                # Fire TTS as background task; store task so we can cancel on disconnect
+                
+                # PRE-WARM STT: Start the STT process in background while TTS is playing
+                asyncio.create_task(start_sonic_stt(websocket, sid))
+                
+                # Fire TTS as background task
                 tts_task = asyncio.create_task(run_tts_inline(websocket, sid, text_to_speak))
                 session_data["tts_task"] = tts_task
             else:
@@ -210,13 +336,23 @@ async def process_outbox(websocket: WebSocket, sid: str):
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
+    # Validate agent_id before accepting so we can reject with a close code.
+    try:
+        plugin = get_plugin(agent)
+    except KeyError as exc:
+        await websocket.accept()
+        await websocket.close(code=4000, reason=str(exc))
+        logger.error("[WebSocket] Unknown agent_id=%r, closing with 4000", agent)
+        return
+
     await websocket.accept()
     session_id = f"sess_{id(websocket)}"
-    logger.info(f"[WebSocket] New connection: {session_id}")
-    
+    logger.info("[WebSocket] New connection: %s (agent=%s)", session_id, agent)
+
     sessions[session_id] = {
-        "state": create_initial_state(),
+        "agent_id": agent,
+        "state": plugin.create_initial_state(),
         "voice_playing": False,
         "tts_task": None,
         "sonic": None,
@@ -232,9 +368,12 @@ async def websocket_endpoint(websocket: WebSocket):
         lf_callback = get_langfuse_callback()
         config = {
             "callbacks": [lf_callback],
-            "metadata": {"langfuse_session_id": session_id}
+            "metadata": {
+                "langfuse_session_id": session_id,
+                "agent_id": sessions[session_id].get("agent_id", "mortgage"),
+            },
         }
-        initial_res = await asyncio.to_thread(app_graph.invoke, sessions[session_id]["state"], config)
+        initial_res = await invoke_graph(plugin, sessions[session_id]["state"], config)
         # Suppress any voice on initial load to avoid double-audio from React StrictMode remounts
         initial_res["outbox"] = [e for e in initial_res.get("outbox", []) if e["type"] != "server.voice.say"]
         sessions[session_id]["state"] = initial_res
@@ -256,104 +395,12 @@ async def websocket_endpoint(websocket: WebSocket):
             session_data = sessions.get(sid)
             if not session_data: continue
             
-            state: AgentState = session_data["state"]
+            state = session_data["state"]
 
-            if msg_type in ["client.audio.start", "client.audio.stop"]:
-                logger.info(f"--- Received '{msg_type}' from {sid} ---")
-
-            # Inline helpers for Nova Sonic callbacks
-            async def handle_audio_chunk(chunk_b64):
-                await send_msg(websocket, sid, "server.voice.audio", {"data": chunk_b64})
-
-            async def handle_text_chunk(text, is_user=False, is_final=False):
-                if is_user:
-                    if is_final:
-                        logger.info(f"FINAL USER TEXT RECEIVED: {text}")
-                        session_data["user_transcripts"] = [text]
-                    else:
-                        logger.debug(f"APPENDING USER TEXT: {text}")
-                        session_data["user_transcripts"].append(text)
-                    # Send partial transcript to client for real-time feedback
-                    await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
-                else:
-                    if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
-                    session_data["assist_buffer"].append(text)
-                    await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
-
-            async def handle_finished():
-                # Use local session_data reference to avoid KeyErrors if session is cleaned up
-                current_state = session_data["state"]
-                
-                if session_data.get("handling_finished"):
-                    logger.warning(f"Nova Sonic: handle_finished already in progress for {sid}, skipping duplicate.")
-                    return
-                
-                session_data["handling_finished"] = True
-                try:
-                    assist_text = "".join(session_data.get("assist_buffer", [])).strip()
-                    if assist_text:
-                        current_state["messages"].append({"role": "assistant", "text": assist_text})
-                        session_data["assist_buffer"] = []
-
-                    full_transcript = "".join(session_data["user_transcripts"]).strip()
-                    # Continue even if empty to detect silence/trouble
-                    session_data["user_transcripts"] = []
-                    
-                    await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
-                    
-                    current_state["transcript"] = full_transcript
-                    current_state["mode"] = "voice"
-                    if full_transcript:
-                        current_state["messages"].append({"role": "user", "text": full_transcript})
-                    
-                    await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
-                    
-                    try:
-                        lf_callback = get_langfuse_callback()
-                        config = {
-                            "callbacks": [lf_callback],
-                            "metadata": {"langfuse_session_id": sid}
-                        }
-                        res = await asyncio.to_thread(app_graph.invoke, current_state, config)
-                        if sid in sessions:
-                            sessions[sid]["state"] = res
-                        await process_outbox(websocket, sid)
-                    except Exception as e:
-                        import traceback
-                        logger.error(f"Error in LangGraph matching (voice/finished): {e}")
-                        traceback.print_exc()
-                finally:
-                    session_data["handling_finished"] = False
                 
             if msg_type == "client.audio.start":
-                # Allow audio input regardless of current mode - mode will be set to "voice" when transcript is ready
-                if session_data["sonic"]:
-                    try:
-                        await session_data["sonic"].end_session()
-                    except: pass
-                
-                # Nova Sonic is used for STT transcription only.
-                # The non-bidirectional API returns only assistant-role text (the model's echo of the user's speech).
-                # We capture all text output and treat it as the user's spoken words.
-                async def _on_text_chunk(text, is_user=False, is_final=False):
-                    await handle_text_chunk(text, is_user=True, is_final=is_final)
-
-                sonic = NovaSonicSession(
-                    on_audio_chunk=lambda x, **kw: None,  # Suppress Nova Sonic's own audio output
-                    on_text_chunk=_on_text_chunk,
-                    on_finished=handle_finished
-                )
-                
-                session_data["sonic"] = sonic
-                session_data["user_transcripts"] = []
-                
-                try:
-                    if not os.getenv("AWS_ACCESS_KEY_ID"):
-                        logger.warning("AWS Credentials not found. Nova Sonic will fail.")
-                    await sonic.start_session()
-                    await sonic.start_audio_input()
-                except Exception as e:
-                    logger.error(f"Failed to start Nova Sonic session: {e}", exc_info=True)
+                # Re-use or start the sonic session
+                await start_sonic_stt(websocket, sid)
                 
             elif msg_type == "client.audio.chunk":
                 if session_data["sonic"]:
@@ -362,7 +409,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if "chunk_count" not in session_data:
                             session_data["chunk_count"] = 0
                         session_data["chunk_count"] += 1
-                        if session_data["chunk_count"] % 50 == 0:
+                        if session_data["chunk_count"] % 10 == 0:
                             logger.info(f"--- Received {session_data['chunk_count']} audio chunks so far ---")
                         await session_data["sonic"].send_audio_chunk(b64)
                         
@@ -411,9 +458,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     lf_callback = get_langfuse_callback()
                     config = {
                         "callbacks": [lf_callback],
-                        "metadata": {"langfuse_session_id": sid}
+                        "metadata": {
+                            "langfuse_session_id": sid,
+                            "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                        },
                     }
-                    res = await asyncio.to_thread(app_graph.invoke, state, config)
+                    _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
+                    res = await invoke_graph(_plugin, state, config)
                     if sid in sessions:
                         sessions[sid]["state"] = res
                     await process_outbox(websocket, sid)
@@ -438,9 +489,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         lf_callback = get_langfuse_callback()
                         config = {
                             "callbacks": [lf_callback],
-                            "metadata": {"langfuse_session_id": sid}
+                            "metadata": {
+                                "langfuse_session_id": sid,
+                                "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                            },
                         }
-                        res = await asyncio.to_thread(app_graph.invoke, current_state, config)
+                        _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
+                        res = await invoke_graph(_plugin, current_state, config)
                         if sid in sessions:
                             sessions[sid]["state"] = res
                         await process_outbox(websocket, sid)
@@ -465,23 +520,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 if new_device:
                     state["device"] = new_device
 
-                # If the device changed, push a new UI update immediately
+                # If the device changed, re-render the current screen via a full graph invoke.
                 if new_device and new_device != old_device:
-                    from app.agent.graph import render_missing_inputs, render_products_a2ui
-                    
-                    # Determine which rendering logic to use based on current progress
-                    intent = state.get("intent", {})
-                    if intent.get("category") and state.get("products"):
-                        update = render_products_a2ui(state)
-                    else:
-                        update = render_missing_inputs(state)
-                    
-                    # Extract outbox items and send them
-                    if "outbox" in update:
-                        for item in update["outbox"]:
-                            await websocket.send_json(item)
-                        # Sync state updates back to session
-                        state.update({k: v for k, v in update.items() if k != "outbox"})
+                    # Clear transcript and pendingAction so start_router does not
+                    # re-interpret the last user message — we only want a re-render.
+                    state["transcript"] = ""
+                    state["pendingAction"] = None
+                    lf_callback = get_langfuse_callback()
+                    config = {
+                        "callbacks": [lf_callback],
+                        "metadata": {
+                            "langfuse_session_id": sid,
+                            "agent_id": sessions[sid].get("agent_id", "mortgage"),
+                        },
+                    }
+                    _plugin = get_plugin(sessions[sid].get("agent_id", "mortgage"))
+                    try:
+                        res = await invoke_graph(_plugin, state, config)
+                        sessions[sid]["state"] = res
+                        await process_outbox(websocket, sid)
+                    except Exception as e:
+                        logger.error("Error re-rendering on device change: %s", e)
                 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")
