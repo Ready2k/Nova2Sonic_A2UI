@@ -695,20 +695,19 @@ export default function TransferPage() {
             Dependencies
           </h2>
           <p className="text-sm text-gray-500 mb-6">
-            The imported agent declares the following Python packages. Install
-            them in the server virtual environment before the plugin can call
-            the external graph.
+            The imported agent declares the following Python packages. They will
+            be installed automatically into the server virtual environment when
+            you click <strong>Write Plugin</strong>.
           </p>
 
           {hasDeps ? (
             <>
               <div className="rounded-xl bg-slate-900 p-4 mb-4">
                 <p className="text-xs text-slate-400 font-mono mb-2">
-                  # Run in server/
+                  # Will be run automatically on write
                 </p>
-                <p className="text-sm text-green-400 font-mono">
-                  pip install -r app/agent/plugins/{preview.plugin_id}
-                  /requirements_import.txt
+                <p className="text-sm text-green-400 font-mono break-all">
+                  pip install {preview.requirements_to_install.join(' ')}
                 </p>
               </div>
               <div className="space-y-1.5">
@@ -725,7 +724,7 @@ export default function TransferPage() {
             </>
           ) : (
             <div className="rounded-xl bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-700">
-              ✓ No additional dependencies declared — safe to install immediately.
+              ✓ No additional dependencies declared.
             </div>
           )}
         </div>
