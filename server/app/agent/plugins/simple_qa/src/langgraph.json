@@ -1,0 +1,6 @@
+{
+  "graphs": {
+    "simple_qa": "./agent.py:graph"
+  },
+  "dependencies": ["."]
+}
