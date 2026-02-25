@@ -58,6 +58,6 @@ class LostCardPlugin(PluginBase):
         return {
             "voice_greeting": "Hello, I can help you with your lost or stolen card.",
             "supported_components": [
-                "Column", "Row", "DataCard", "Button", "Timeline",
+                "Column", "Row", "DataCard", "Button", "Timeline", "BenefitCard",
             ],
         }

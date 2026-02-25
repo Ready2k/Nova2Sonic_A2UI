@@ -243,8 +243,31 @@ async def process_outbox(websocket: WebSocket, sid: str):
                         state.get("domain", {})
                         .get("mortgage", {})
                         .get("show_support", False)
+                        or state.get("domain", {})
+                        .get("lost_card", {})
+                        .get("show_support", False)
                     )
                 await send_msg(websocket, sid, event["type"], payload)
+
+                if event["type"] == "server.internal.handoff":
+                    new_agent_id = payload.get("agent_id")
+                    if new_agent_id:
+                        logger.info(f"--- HANDOFF: Switching session {sid} to agent: {new_agent_id} ---")
+                        try:
+                            new_plugin = get_plugin(new_agent_id)
+                            session_data["agent_id"] = new_agent_id
+                            
+                            # Re-initialize state for the new plugin but keep CommonState envelope items
+                            fresh_state = new_plugin.create_initial_state()
+                            for key in ["mode", "device", "messages", "meta"]:
+                                if key in state:
+                                    fresh_state[key] = state[key]
+                            
+                            # Merge existing messages if any
+                            session_data["state"] = fresh_state
+                            # Important: the current loop continues, but the session is now 're-homed'
+                        except Exception as hex:
+                            logger.error(f"Handoff failed: {hex}")
 
                 if event["type"] == "server.transcript.final":
                     payload = event.get("payload") or {}

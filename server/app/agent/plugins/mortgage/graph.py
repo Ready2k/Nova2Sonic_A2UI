@@ -495,6 +495,12 @@ def interpret_intent(state: AgentState):
     _dm(state)["last_question_context"] = last_question_context
     _dm(state)["intent"] = new_intent
 
+    # ── Lost Card detection (Handoff trigger) ──────────────────────────────────
+    lost_card_keywords = ["lost card", "stolen card", "freeze my card", "lost my card", "stolen my card"]
+    if any(kw in transcript.lower() for kw in lost_card_keywords):
+        logger.info("Lost card intent detected in Mortgage agent. Preparing handoff.")
+        _dm(state)["handoff_requested"] = "lost_card"
+
     return {
         "domain": state.get("domain", {}),
     }
@@ -713,17 +719,35 @@ def render_missing_inputs(state: AgentState):
             with open(os.path.join(_ASSETS_DIR, "remortgage_b64.txt"), "r") as f: remortgage_icon = f.read().strip()
             with open(os.path.join(_ASSETS_DIR, "btl_b64.txt"), "r") as f: btl_icon = f.read().strip()
             with open(os.path.join(_ASSETS_DIR, "moving_b64.txt"), "r") as f: moving_icon = f.read().strip()
+            # Default fallback for lost card if no b64 file exists
+            try:
+                with open(os.path.join(_ASSETS_DIR, "lost_card_b64.txt"), "r") as f: lost_card_icon = f.read().strip()
+            except:
+                lost_card_icon = "" 
         except:
-            ftb_icon = remortgage_icon = btl_icon = moving_icon = ""
+            ftb_icon = remortgage_icon = btl_icon = moving_icon = lost_card_icon = ""
 
         device = state.get("device", "desktop")
         
         if device == "mobile":
             components = [
                 {"id": "root", "component": "Column", "children": ["header", "options_list"]},
-                {"id": "header", "component": "Text", "text": "Mortgage Options", "variant": "h2"},
-                {"id": "options_list", "component": "Column", "children": ["opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
+                {"id": "header", "component": "Text", "text": "Barclays Services", "variant": "h2"},
+                {"id": "options_list", "component": "Column", "children": ["opt_lost_card", "opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
                 
+                {
+                    "id": "opt_lost_card", 
+                    "component": "ListItem", 
+                    "text": "Card Services", 
+                    "data": {
+                        "number": "00",
+                        "subtext": "Lost or stolen card?",
+                        "rightText": "URGENT",
+                        "url": f"data:image/png;base64,{lost_card_icon}",
+                        "action": "lost_card.start", 
+                        "category": "Lost Card"
+                    }
+                },
                 {
                     "id": "opt_ftb", 
                     "component": "ListItem", 
@@ -786,10 +810,16 @@ def render_missing_inputs(state: AgentState):
         else:
             components = [
                 {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
-                {"id": "header", "component": "Text", "text": "Your mortgage options", "variant": "h2"},
-                {"id": "options_grid", "component": "Column", "children": ["row_1", "row_2"]},
+                {"id": "header", "component": "Text", "text": "How can we help today?", "variant": "h2"},
+                {"id": "options_grid", "component": "Column", "children": ["row_0", "row_1", "row_2"]},
+                {"id": "row_0", "component": "Row", "children": ["opt_lost_card"]},
                 {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
                 {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
+                
+                {"id": "opt_lost_card", "component": "Column", "children": ["img_lost_card", "btn_lost_card"]},
+                {"id": "img_lost_card", "component": "Image", "data": {"url": f"data:image/png;base64,{lost_card_icon}"}, "text": "Lost Card"},
+                {"id": "btn_lost_card", "component": "Button", "text": "Report Lost or Stolen Card", "data": {"action": "lost_card.start"}},
+
                 {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
                 {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
                 {"id": "btn_ftb", "component": "Button", "text": "First-time buyer", "data": {"action": "select_category", "category": "First-time buyer"}},
@@ -1434,6 +1464,21 @@ def confirm_application(state: AgentState):
     return {"outbox": new_outbox, "ui": ui_state, "messages": new_messages, "transcript": ""}
 
 
+def handoff_to_lost_card(state: AgentState):
+    """Transition the session to the Lost Card plugin."""
+    new_outbox = [
+        {
+            "type": "server.internal.handoff",
+            "payload": {"agent_id": "lost_card"}
+        }
+    ]
+    # Small bridging message
+    msg = "I'll hand you over to our card services team right away to help you with that."
+    new_outbox.append({"type": "server.voice.say", "payload": {"text": msg}})
+    
+    return {"outbox": new_outbox, "transcript": "", "pendingAction": None}
+
+
 # ─── Routers ──────────────────────────────────────────────────────────────────
 
 def _all_required_fields_present(intent: dict) -> bool:
@@ -1491,6 +1536,8 @@ def ui_action_router(state: AgentState):
         return "render_summary_a2ui"
     elif action_id == "confirm_application":
         return "confirm_application"
+    elif action_id == "lost_card.start":
+        return "handoff_to_lost_card"
     elif action_id in ("reset_flow", "select_category"):
         return "render_missing_inputs"
     return "clear_pending_action"
@@ -1509,6 +1556,8 @@ def start_router(state: AgentState):
 
 
 def intent_router(state: AgentState):
+    if _dm_get(state, "handoff_requested") == "lost_card":
+        return "handoff_to_lost_card"
     intent = _intent(state)
     if not _all_required_fields_present(intent):
         return "render_missing_inputs"
@@ -1528,6 +1577,7 @@ workflow.add_node("handle_ui_action", handle_ui_action)
 workflow.add_node("recalculate_and_patch", recalculate_and_patch)
 workflow.add_node("render_summary_a2ui", render_summary_a2ui)
 workflow.add_node("confirm_application", confirm_application)
+workflow.add_node("handoff_to_lost_card", handoff_to_lost_card)
 workflow.add_node("clear_pending_action", clear_pending_action)
 
 workflow.add_edge(START, "ingest_input")
@@ -1544,6 +1594,7 @@ workflow.add_conditional_edges("handle_ui_action", ui_action_router)
 workflow.add_edge("recalculate_and_patch", "clear_pending_action")
 workflow.add_edge("render_summary_a2ui", "clear_pending_action")
 workflow.add_edge("confirm_application", "clear_pending_action")
+workflow.add_edge("handoff_to_lost_card", END)
 
 workflow.add_edge("clear_pending_action", END)
 
