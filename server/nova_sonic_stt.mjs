@@ -235,8 +235,8 @@ async function main() {
                 }
 
                 if (role === 'ASSISTANT' && type === 'TEXT') {
-                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started (transcription stream)`);
-                    inUserTextBlock = true; // Treat assistant output as the transcription content
+                    // Nova Sonic's own conversational response — not a transcription, ignore.
+                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started (Nova response — ignored)`);
                 }
             }
 
@@ -244,13 +244,11 @@ async function main() {
                 const role = eventData.textOutput.role;
                 const content = eventData.textOutput.content || '';
 
-                // --- Simple De-duplication Logic ---
-                // If the model sends the same text in both USER and ASSISTANT roles,
-                // we only want to accumulate it once. 
-                // We'll prioritize the ASSISTANT role for literal transcripts.
-                if (role === 'ASSISTANT' || (role === 'USER' && !userTranscript.includes(content))) {
+                // Only accumulate USER role text — that is the verbatim transcription.
+                // ASSISTANT role is Nova Sonic's own conversational response; ignore it.
+                if (role === 'USER' && content) {
                     userTranscript += content;
-                    console.log(`TRANSCRIPT_PARTIAL:${content}`);
+                    console.log(`TRANSCRIPT_PARTIAL:${userTranscript.trim()}`);
                 }
             }
 

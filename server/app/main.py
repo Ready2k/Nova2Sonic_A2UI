@@ -71,7 +71,7 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
         chunk_count = 0
         while True:
             line = await proc.stdout.readline()
-            if not line: 
+            if not line:
                 logger.info(f"[TTS] No more output, received {chunk_count} audio chunks")
                 break
             decoded = line.decode().strip()
@@ -80,10 +80,7 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
                 chunk_data = decoded.split("AUDIO_CHUNK:")[1]
                 logger.info(f"[TTS] Sending audio chunk {chunk_count}, size: {len(chunk_data)}")
                 await send_msg(websocket, session_id, "server.voice.audio", {"data": chunk_data})
-        
-        # Signal stop to client immediately once stdout ends
-        await send_msg(websocket, session_id, "server.voice.stop", {"sid": session_id})
-        
+
         await proc.wait()
         await stderr_task
 
@@ -91,10 +88,15 @@ async def run_tts_inline(websocket: WebSocket, session_id: str, text_to_speak: s
         logger.error(f"TTS fallback failed: {e}")
     finally:
         if session_id in sessions:
-            logger.info(f"[TTS] Setting voice_playing to False")
+            was_playing = sessions[session_id].get("voice_playing", False)
             sessions[session_id]["voice_playing"] = False
-        logger.info(f"[TTS] Sending voice.stop for {session_id}")
-        await send_msg(websocket, session_id, "server.voice.stop", {})
+            if was_playing:
+                # Only send voice.stop if we were the one playing — prevents a duplicate
+                # stop when client.audio.interrupt already cleared voice_playing and sent its own stop.
+                logger.info(f"[TTS] Sending voice.stop for {session_id}")
+                await send_msg(websocket, session_id, "server.voice.stop", {})
+            else:
+                logger.info(f"[TTS] voice_playing already False (interrupted externally) — skipping voice.stop")
 
 
 async def start_sonic_stt(websocket: WebSocket, sid: str):
@@ -106,11 +108,17 @@ async def start_sonic_stt(websocket: WebSocket, sid: str):
     if session_data.get("sonic"):
         return session_data["sonic"]
 
-    # Verbatim STT prompt optimized for short mortgage-related responses
+    # STT prompt: transcribe verbatim with postcode/number normalisation.
+    # NOTE: Do NOT mention financial topics — Nova Sonic's content guardrails may refuse.
     stt_system_prompt = (
-        "You are a verbatim speech-to-text transcriber for a mortgage assistant. "
-        "Output ONLY the exact words spoken by the user. If they say 'yes', 'no', 'I do', or 'yep', output exactly that. "
-        "Do not add punctuation, do not add commentary, and do not try to fix the user's grammar."
+        "You are a verbatim speech-to-text transcription service for UK users. "
+        "Apply only these two normalizations: "
+        "(1) UK postcodes — when the speaker spells out a postcode phonetically or letter-by-letter, "
+        "convert it to standard uppercase postcode format with a space before the inward code "
+        "(e.g. 's t three five t w' or 'sierra tango three five tango whisky' → 'ST3 5TW'); "
+        "(2) Numbers — convert unambiguous spoken number words to digits "
+        "(e.g. 'four hundred thousand' → '400000', 'eighty thousand' → '80000'); "
+        "Transcribe all other speech verbatim. Do not add commentary, context or meaning."
     )
 
     async def _on_text_chunk(text, is_user=False, is_final=False):
@@ -144,12 +152,13 @@ async def handle_text_chunk(websocket: WebSocket, sid: str, text: str, is_user=F
     if is_user:
         if is_final:
             logger.info(f"FINAL USER TEXT RECEIVED: {text}")
+            # Store only the final transcript; partials are not accumulated.
             session_data["user_transcripts"] = [text]
         else:
-            logger.debug(f"APPENDING USER TEXT: {text}")
-            session_data["user_transcripts"].append(text)
-        # Send partial transcript to client for real-time feedback
-        await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
+            logger.debug(f"PARTIAL USER TEXT: {text}")
+            # Send rolling partial to client for real-time display.
+            # Do NOT accumulate in user_transcripts — only the final TRANSCRIPT matters.
+            await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
     else:
         if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
         session_data["assist_buffer"].append(text)
@@ -173,16 +182,20 @@ async def handle_finished_for_sid(websocket: WebSocket, sid: str):
             session_data["assist_buffer"] = []
 
         full_transcript = "".join(session_data["user_transcripts"]).strip()
-        # Continue even if empty to detect silence/trouble
         session_data["user_transcripts"] = []
-        
+
+        if not full_transcript:
+            # Empty transcript = mic captured silence after auto-restart.
+            # Skip graph invocation to avoid re-asking the same question.
+            logger.info("Empty transcript after voice turn — skipping graph run.")
+            return
+
         await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
-        
+
         current_state["transcript"] = full_transcript
         current_state["mode"] = "voice"
-        if full_transcript:
-            current_state["messages"].append({"role": "user", "text": full_transcript})
-        
+        current_state["messages"].append({"role": "user", "text": full_transcript})
+
         await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
         
         try:
@@ -477,9 +490,17 @@ async def websocket_endpoint(websocket: WebSocket, agent: str = "mortgage"):
             elif msg_type == "client.ui.action":
                 action_id = payload.get("id")
                 data = payload.get("data", {})
-                
+
                 logger.info(f"Received UI Action: {action_id} with data: {data}")
-                
+
+                # Cancel any in-flight TTS so the response to this action can speak immediately.
+                if session_data.get("tts_task") and not session_data["tts_task"].done():
+                    logger.info(f"[UI Action] Cancelling in-flight TTS for action: {action_id}")
+                    session_data["tts_task"].cancel()
+                    session_data["tts_task"] = None
+                session_data["voice_playing"] = False
+                await send_msg(websocket, sid, "server.voice.stop", {})
+
                 try:
                     # Always use latest state (stale closure guard)
                     current_state = sessions[sid]["state"]

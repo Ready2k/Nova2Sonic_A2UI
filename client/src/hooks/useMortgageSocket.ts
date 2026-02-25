@@ -276,7 +276,8 @@ export function useMortgageSocket(url: string) {
             if (type === 'server.ready') {
                 console.log('Server is ready');
             } else if (type === 'server.transcript.partial') {
-                setPartialTranscript(prev => prev + (prev ? ' ' : '') + payload.text);
+                // Replace (not accumulate) — the server now emits the full rolling transcript each time.
+                setPartialTranscript(payload.text);
             } else if (type === 'server.transcript.final') {
                 const role = (payload.role || 'user') as 'user' | 'assistant';
                 if (role === 'user') {
@@ -435,7 +436,9 @@ export function useMortgageSocket(url: string) {
             const audioCtx = new AudioContextClass({ sampleRate: 16000 });
             recordingContextRef.current = audioCtx;
 
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            });
             recordingStreamRef.current = stream;
 
             // Resume audioCtx if it was created in a suspended state
