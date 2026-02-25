@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, Suspense } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -13,7 +13,7 @@ function formatAgentName(id: string): string {
   return id.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
-export default function Home() {
+function HomeContent() {
   const searchParams = useSearchParams();
   const agentParam = searchParams.get('agent') ?? 'mortgage';
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
@@ -52,6 +52,43 @@ export default function Home() {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
   const [chatY, setChatY] = useState(0);
+  const [chatHeight, setChatHeight] = useState(410);
+  const [mobileChatHeight, setMobileChatHeight] = useState(160);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const startResizing = (e: React.MouseEvent | React.TouchEvent, isMobileResize = false) => {
+    // Note: preventDefault can cause issues on touch if not handled carefully, 
+    // but here it's needed to prevent scrolling while resizing.
+    if (e.cancelable) e.preventDefault();
+    setIsResizing(true);
+
+    const startY = 'touches' in e ? e.touches[0].pageY : e.pageY;
+    const startHeight = isMobileResize ? mobileChatHeight : chatHeight;
+
+    const onMove = (moveEvent: MouseEvent | TouchEvent) => {
+      const currentY = 'touches' in moveEvent ? moveEvent.touches[0].pageY : moveEvent.pageY;
+      const deltaY = currentY - startY;
+      if (isMobileResize) {
+        // Dragging UP (negative deltaY) increases height
+        setMobileChatHeight(Math.max(120, Math.min(500, startHeight - deltaY)));
+      } else {
+        setChatHeight(Math.max(200, Math.min(800, startHeight + deltaY)));
+      }
+    };
+
+    const onEnd = () => {
+      setIsResizing(false);
+      document.removeEventListener('mousemove', onMove as any);
+      document.removeEventListener('mouseup', onEnd);
+      document.removeEventListener('touchmove', onMove as any);
+      document.removeEventListener('touchend', onEnd);
+    };
+
+    document.addEventListener('mousemove', onMove as any);
+    document.addEventListener('mouseup', onEnd);
+    document.addEventListener('touchmove', onMove as any, { passive: false });
+    document.addEventListener('touchend', onEnd);
+  };
 
   useEffect(() => {
     // Follow focus logic: find the element being highlighted in the right panel
@@ -69,7 +106,6 @@ export default function Home() {
 
         // Match the element's top position in the viewport, 
         // offset by a small bit to look balanced.
-        const chatHeight = 400; // Expected max height
         let targetY = focusedRect.top - panelRect.top;
 
         // Constrain to panel visible area 
@@ -102,7 +138,7 @@ export default function Home() {
       panel.removeEventListener('scroll', updateChatPosition);
       window.removeEventListener('resize', updateChatPosition);
     };
-  }, [a2uiState, messages, isMobile]);
+  }, [a2uiState, messages, isMobile, chatHeight]);
 
   useEffect(() => {
     // Scroll to bottom of message log when new message is added
@@ -113,7 +149,7 @@ export default function Home() {
     fetch('/api/import-agent/plugins')
       .then(r => r.json())
       .then(d => setAvailableAgents(d.plugins || []))
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -167,6 +203,32 @@ export default function Home() {
 
   const renderChatLog = (isMobileView = false) => (
     <div className={`flex-1 overflow-y-auto w-full pr-2 space-y-4 mb-4 mt-2 no-scrollbar ${isMobileView ? 'px-4' : ''}`}>
+      {/* Top Status Indicators (Desktop only - Mobile has them in header) */}
+      {!isMobileView && (thinkingState || voicePlaying) && (
+        <div className="flex flex-col gap-2 pb-2 sticky top-0 z-10 bg-inherit backdrop-blur-sm -mx-2 px-2">
+          {thinkingState && (
+            <div className="flex justify-start">
+              <div className="flex bg-blue-50 border border-blue-100 rounded-full px-3 py-1 gap-2 items-center shadow-md animate-in fade-in slide-in-from-top-2 duration-300">
+                <div className="w-2.5 h-2.5 rounded-full border-2 border-blue-200 border-t-blue-600 animate-spin"></div>
+                <span className="text-[10px] text-blue-700 font-bold uppercase tracking-wider">{thinkingState.replace('_', ' ')}</span>
+              </div>
+            </div>
+          )}
+          {voicePlaying && (
+            <div className="flex justify-start">
+              <div className="flex bg-white border border-blue-100 px-3 py-1 rounded-full shadow-md items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                <div className="flex items-end h-3 gap-0.5 justify-center">
+                  <div className="w-0.5 bg-blue-500 rounded-full animate-pulse h-1.5" style={{ animationDelay: '0ms' }}></div>
+                  <div className="w-0.5 bg-indigo-500 rounded-full animate-pulse h-3" style={{ animationDelay: '100ms' }}></div>
+                  <div className="w-0.5 bg-blue-600 rounded-full animate-pulse h-2.5" style={{ animationDelay: '200ms' }}></div>
+                </div>
+                <span className="text-[10px] text-blue-600 font-black uppercase tracking-widest leading-none">Live Audio</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {messages.length === 0 && !thinkingState && !voicePlaying && !isMobileView && (
         <div className="h-full flex items-center justify-center text-center">
           <div className="text-gray-400 text-[11px] font-bold uppercase tracking-widest opacity-60">
@@ -191,28 +253,6 @@ export default function Home() {
         <div className="flex flex-col gap-1 items-end opacity-70 italic">
           <div className="rounded-2xl px-4 py-2 shadow-sm max-w-[85%] text-sm bg-blue-500 text-white rounded-tr-sm">
             {partialTranscript}...
-          </div>
-        </div>
-      )}
-
-      {thinkingState && (
-        <div className="flex justify-start my-2">
-          <div className="flex bg-gray-100 rounded-2xl rounded-tl-sm px-4 py-2 gap-2 items-center border border-gray-200">
-            <div className="w-3 h-3 rounded-full border-[2px] border-blue-200 border-t-blue-600 animate-spin"></div>
-            <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">{thinkingState.replace('_', ' ')}</span>
-          </div>
-        </div>
-      )}
-
-      {voicePlaying && (
-        <div className="flex justify-start my-2">
-          <div className="flex bg-white px-4 py-2 rounded-2xl rounded-tl-sm shadow-sm border border-blue-100 items-center justify-center gap-2">
-            <div className="flex items-end h-4 gap-1 justify-center">
-              <div className="w-1 bg-blue-500 rounded-full animate-pulse h-2" style={{ animationDelay: '0ms' }}></div>
-              <div className="w-1 bg-indigo-500 rounded-full animate-pulse h-4" style={{ animationDelay: '100ms' }}></div>
-              <div className="w-1 bg-blue-600 rounded-full animate-pulse h-3" style={{ animationDelay: '200ms' }}></div>
-            </div>
-            <span className="text-[10px] text-blue-600 font-black uppercase tracking-widest">Live Audio</span>
           </div>
         </div>
       )}
@@ -418,10 +458,13 @@ export default function Home() {
             {/* Left Panel - Chat / Controls */}
             <div className="w-[35%] min-w-[340px] max-w-lg bg-white border-r border-gray-200 p-6 shadow-xl z-[5] overflow-y-auto no-scrollbar relative">
               <div
-                className="flex flex-col gap-6 transition-all duration-700 ease-in-out absolute left-6 right-6"
+                className={`flex flex-col gap-6 absolute left-6 right-6 ${isResizing ? '' : 'transition-[top] duration-700 ease-in-out'}`}
                 style={{ top: `${chatY + 24}px` }}
               >
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col relative overflow-hidden group hover:border-blue-200 transition-colors h-[410px]">
+                <div
+                  className="bg-slate-50 border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col relative group hover:border-blue-200 transition-colors"
+                  style={{ height: `${chatHeight}px` }}
+                >
                   {/* Decorative line */}
                   <div className="absolute top-0 w-full h-1 bg-gradient-to-r from-blue-400 to-indigo-500 left-0"></div>
 
@@ -430,6 +473,14 @@ export default function Home() {
 
                   {/* Controls */}
                   {renderChatControls()}
+
+                  {/* Resize Handle */}
+                  <div
+                    onMouseDown={startResizing}
+                    className="absolute bottom-0 left-0 right-0 h-6 cursor-ns-resize flex items-center justify-center group/handle z-30"
+                  >
+                    <div className="w-12 h-1.5 bg-gray-300 rounded-full group-hover/handle:bg-blue-400 transition-colors" />
+                  </div>
                 </div>
 
                 <LatencyHud latency={latency} connected={connected} />
@@ -493,7 +544,7 @@ export default function Home() {
                 {/* Mobile Scrollable Area */}
                 <div className="flex-1 overflow-y-auto flex flex-col relative no-scrollbar">
                   {/* App Header */}
-                  <div className="px-6 pt-4 pb-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-[60]">
+                  <div className="px-5 pt-3 pb-3 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-[60]">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-black text-sm">B</div>
                       <div>
@@ -503,6 +554,27 @@ export default function Home() {
                         <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Assistant AI</p>
                       </div>
                     </div>
+
+                    {/* Status Indicators (Mobile Only Header Placement) */}
+                    <div className="flex items-center gap-2 flex-1 justify-center px-2">
+                      {thinkingState && (
+                        <div className="flex bg-blue-50/50 border border-blue-100/50 rounded-full px-2 py-0.5 gap-1.5 items-center shadow-sm animate-in fade-in zoom-in duration-300">
+                          <div className="w-2 h-2 rounded-full border-2 border-blue-200 border-t-blue-600 animate-spin"></div>
+                          <span className="text-[8px] text-blue-700 font-bold uppercase tracking-tight">{thinkingState.replace('thinking_', '')}</span>
+                        </div>
+                      )}
+                      {voicePlaying && (
+                        <div className="flex bg-white border border-blue-100 px-2 py-0.5 rounded-full shadow-sm items-center gap-1.5 animate-in fade-in zoom-in duration-300">
+                          <div className="flex items-end h-2 gap-0.5">
+                            <div className="w-0.5 bg-blue-500 rounded-full animate-pulse h-1" style={{ animationDelay: '0ms' }}></div>
+                            <div className="w-0.5 bg-indigo-500 rounded-full animate-pulse h-2" style={{ animationDelay: '100ms' }}></div>
+                            <div className="w-0.5 bg-blue-600 rounded-full animate-pulse h-1.5" style={{ animationDelay: '200ms' }}></div>
+                          </div>
+                          <span className="text-[8px] text-blue-600 font-bold uppercase tracking-tight">Live</span>
+                        </div>
+                      )}
+                    </div>
+
                     {/* Barclays Eagle Logo for existing customers */}
                     {a2uiState?.isExistingCustomer && (
                       <div className="w-8 h-8 flex items-center justify-center animate-in fade-in zoom-in duration-500">
@@ -518,11 +590,10 @@ export default function Home() {
                   </div>
 
                   {/* Main A2UI Content */}
-                  <div className="px-4 py-2 flex flex-col flex-1 min-h-0 bg-slate-50/50">
+                  <div className="px-3 py-1 flex flex-col flex-1 min-h-0 bg-slate-50/50">
                     <div className="flex-1">
                       <A2Renderer a2uiState={a2uiState} onAction={sendAction} isMobile={isMobile} />
                     </div>
-                    <div className="h-10 flex-shrink-0"></div> {/* Reduced spacer for bottom shadow/chat */}
                   </div>
 
                   {/* Floating Support Button in Mobile */}
@@ -540,14 +611,26 @@ export default function Home() {
                 </div>
 
                 {/* Mobile Bottom Chat Component */}
-                <div className="bg-white border-t border-gray-100 p-3 pb-6 shadow-[0_-10px_30px_rgba(0,0,0,0.05)] z-50">
-                  <div className="max-h-[160px] flex flex-col overflow-hidden mb-2">
+                <div
+                  className="bg-white border-t border-gray-100 p-3 shadow-[0_-10px_30px_rgba(0,0,0,0.05)] z-50 flex flex-col relative"
+                  style={{ height: `${mobileChatHeight}px` }}
+                >
+                  {/* Resize Handle for Mobile */}
+                  <div
+                    onMouseDown={(e) => startResizing(e, true)}
+                    onTouchStart={(e) => startResizing(e, true)}
+                    className="absolute -top-1 left-0 right-0 h-6 cursor-ns-resize flex items-center justify-center group/handle z-[70]"
+                  >
+                    <div className="w-12 h-1 bg-gray-200 rounded-full group-hover/handle:bg-blue-300 transition-colors" />
+                  </div>
+
+                  <div className="flex-1 flex flex-col overflow-hidden mb-1">
                     {renderChatLog(true)}
                   </div>
                   {renderChatControls(true)}
 
                   {/* iPhone Home Indicator */}
-                  <div className="w-32 h-1.5 bg-black/10 rounded-full mx-auto mt-4"></div>
+                  <div className="w-24 h-1 bg-black/5 rounded-full mx-auto mt-2"></div>
                 </div>
               </div>
 
@@ -566,5 +649,17 @@ export default function Home() {
         )}
       </main>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+      </div>
+    }>
+      <HomeContent />
+    </Suspense>
   );
 }

@@ -733,21 +733,8 @@ def render_missing_inputs(state: AgentState):
             components = [
                 {"id": "root", "component": "Column", "children": ["header", "options_list"]},
                 {"id": "header", "component": "Text", "text": "Barclays Services", "variant": "h2"},
-                {"id": "options_list", "component": "Column", "children": ["opt_lost_card", "opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
+                {"id": "options_list", "component": "Column", "children": ["opt_ftb", "opt_remortgage", "opt_btl", "opt_moving", "guidance"]},
                 
-                {
-                    "id": "opt_lost_card", 
-                    "component": "ListItem", 
-                    "text": "Card Services", 
-                    "data": {
-                        "number": "00",
-                        "subtext": "Lost or stolen card?",
-                        "rightText": "URGENT",
-                        "url": f"data:image/png;base64,{lost_card_icon}",
-                        "action": "lost_card.start", 
-                        "category": "Lost Card"
-                    }
-                },
                 {
                     "id": "opt_ftb", 
                     "component": "ListItem", 
@@ -811,14 +798,10 @@ def render_missing_inputs(state: AgentState):
             components = [
                 {"id": "root", "component": "Column", "children": ["header", "options_grid"]},
                 {"id": "header", "component": "Text", "text": "How can we help today?", "variant": "h2"},
-                {"id": "options_grid", "component": "Column", "children": ["row_0", "row_1", "row_2"]},
-                {"id": "row_0", "component": "Row", "children": ["opt_lost_card"]},
+                {"id": "options_grid", "component": "Column", "children": ["row_1", "row_2"]},
                 {"id": "row_1", "component": "Row", "children": ["opt_ftb", "opt_remortgage"]},
                 {"id": "row_2", "component": "Row", "children": ["opt_btl", "opt_moving"]},
                 
-                {"id": "opt_lost_card", "component": "Column", "children": ["img_lost_card", "btn_lost_card"]},
-                {"id": "img_lost_card", "component": "Image", "data": {"url": f"data:image/png;base64,{lost_card_icon}"}, "text": "Lost Card"},
-                {"id": "btn_lost_card", "component": "Button", "text": "Report Lost or Stolen Card", "data": {"action": "lost_card.start"}},
 
                 {"id": "opt_ftb", "component": "Column", "children": ["img_ftb", "btn_ftb"]},
                 {"id": "img_ftb", "component": "Image", "data": {"url": f"data:image/png;base64,{ftb_icon}"}, "text": "FTB"},
