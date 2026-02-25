@@ -240,6 +240,7 @@ export default function TransferPage() {
   // Form state
   const [url, setUrl] = useState('');
   const [pluginId, setPluginId] = useState('');
+  const [strategy, setStrategy] = useState<'wrapper' | 'subgraph' | 'port'>('wrapper');
   const [useLlm, setUseLlm] = useState(true);
 
   // Results
@@ -250,16 +251,27 @@ export default function TransferPage() {
   const [activeFile, setActiveFile] = useState(0);
   const [activeScreen, setActiveScreen] = useState('welcome');
 
+  // Inline JSON editor
+  const [editMode, setEditMode] = useState(false);
+  const [editedScreens, setEditedScreens] = useState<Record<string, ScreenDef> | null>(null);
+  const [jsonEditText, setJsonEditText] = useState('');
+  const [jsonError, setJsonError] = useState('');
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleAnalyse = useCallback(async () => {
     if (!url.trim() || !pluginId.trim()) return;
     setStep('analysing');
     setErrorMsg('');
+    setEditMode(false);
+    setEditedScreens(null);
+    setJsonEditText('');
+    setJsonError('');
     try {
       const result = await callImportApi({
         url: url.trim(),
         plugin_id: pluginId.trim(),
+        strategy,
         use_llm: useLlm,
         dry_run: true,
       });
@@ -274,33 +286,67 @@ export default function TransferPage() {
       setErrorMsg(e instanceof Error ? e.message : String(e));
       setStep('error');
     }
-  }, [url, pluginId, useLlm]);
+  }, [url, pluginId, strategy, useLlm]);
 
   const handleInstall = useCallback(async () => {
     if (!preview) return;
     setStep('installing');
     try {
-      const result = await callImportApi({
+      const body: Record<string, unknown> = {
         url: url.trim(),
         plugin_id: pluginId.trim(),
-        use_llm: useLlm,
+        strategy,
         dry_run: false,
         force: true,
-      });
+      };
+      // If the user edited any screens, send them as an override (skips LLM re-run)
+      if (editedScreens) {
+        body.screens_override = editedScreens;
+        body.use_llm = false;
+      } else {
+        body.use_llm = useLlm;
+      }
+      const result = await callImportApi(body);
       setWriteResult(result);
       setStep('done');
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : String(e));
       setStep('error');
     }
-  }, [preview, url, pluginId, useLlm]);
+  }, [preview, url, pluginId, strategy, useLlm, editedScreens]);
 
   const reset = useCallback(() => {
     setStep('idle');
     setPreview(null);
     setWriteResult(null);
     setErrorMsg('');
+    setEditMode(false);
+    setEditedScreens(null);
+    setJsonEditText('');
+    setJsonError('');
   }, []);
+
+  // Switch screen: load its (possibly edited) JSON into the editor textarea
+  const handleSelectScreen = useCallback((key: string, screens: Record<string, ScreenDef>) => {
+    setActiveScreen(key);
+    if (editMode) {
+      const current = editedScreens?.[key] ?? screens[key];
+      setJsonEditText(JSON.stringify(current, null, 2));
+      setJsonError('');
+    }
+  }, [editMode, editedScreens]);
+
+  // Handle JSON edits: parse and update editedScreens live
+  const handleJsonEdit = useCallback((text: string, screens: Record<string, ScreenDef>) => {
+    setJsonEditText(text);
+    try {
+      const parsed = JSON.parse(text) as ScreenDef;
+      setEditedScreens((prev) => ({ ...screens, ...(prev ?? {}), [activeScreen]: parsed }));
+      setJsonError('');
+    } catch {
+      setJsonError('Invalid JSON');
+    }
+  }, [activeScreen]);
 
   // ── Rendered panels ────────────────────────────────────────────────────────
 
@@ -351,6 +397,37 @@ export default function TransferPage() {
             />
           </div>
 
+          {/* Strategy selector */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+              Integration strategy
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { key: 'wrapper', label: 'Thin Wrapper', desc: 'Runs the graph as-is inside a single node. Best for text-in / text-out agents.' },
+                  { key: 'subgraph', label: 'Sub-graph', desc: 'Embeds the graph as a subgraph. Best for structured-output agents.' },
+                  { key: 'port', label: 'Full Port', desc: 'Generates shells only — manual wiring required. Best for custom flows.' },
+                ] as { key: 'wrapper' | 'subgraph' | 'port'; label: string; desc: string }[]
+              ).map(({ key, label, desc }) => (
+                <button
+                  key={key}
+                  onClick={() => setStrategy(key)}
+                  className={`rounded-xl border p-3 text-left transition-all ${
+                    strategy === key
+                      ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500'
+                      : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  <p className={`text-xs font-semibold mb-0.5 ${strategy === key ? 'text-blue-700' : 'text-gray-700'}`}>
+                    {label}
+                  </p>
+                  <p className="text-[10px] text-gray-500 leading-snug">{desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="flex items-center gap-3 pt-1">
             <button
               onClick={() => setUseLlm((v) => !v)}
@@ -389,8 +466,13 @@ export default function TransferPage() {
     if (!preview) return null;
     const screens = preview.llm_screens || {};
     const screenKeys = Object.keys(screens);
-    const currentScreen = screens[activeScreen];
+    // Merge edits on top of originals so the preview reflects changes
+    const effectiveScreens = editedScreens
+      ? { ...screens, ...editedScreens }
+      : screens;
+    const currentScreen = effectiveScreens[activeScreen];
     const a2uiPayload = currentScreen ? screenToPayload(currentScreen) : null;
+    const hasEdits = editedScreens !== null && Object.keys(editedScreens).length > 0;
 
     return (
       <div className="space-y-4">
@@ -399,6 +481,10 @@ export default function TransferPage() {
           <span>
             <span className="font-semibold text-blue-950">Graph:</span>{' '}
             {preview.graph_selected}
+          </span>
+          <span>
+            <span className="font-semibold text-blue-950">Strategy:</span>{' '}
+            {preview.strategy}
           </span>
           <span>
             <span className="font-semibold text-blue-950">State:</span>{' '}
@@ -452,17 +538,18 @@ export default function TransferPage() {
             </div>
           </div>
 
-          {/* Right: A2UI screen preview */}
+          {/* Right: A2UI screen preview + inline editor */}
           <div className="bg-white rounded-2xl border border-gray-100 flex flex-col overflow-hidden">
-            <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-2.5">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-2">
-                A2UI Preview
+            {/* Header: screen tabs + edit toggle */}
+            <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-2 flex-wrap">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                A2UI
               </span>
-              <div className="flex gap-1 flex-wrap">
+              <div className="flex gap-1 flex-wrap flex-1">
                 {screenKeys.map((key) => (
                   <button
                     key={key}
-                    onClick={() => setActiveScreen(key)}
+                    onClick={() => handleSelectScreen(key, screens)}
                     className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
                       key === activeScreen
                         ? 'bg-blue-600 text-white'
@@ -470,43 +557,100 @@ export default function TransferPage() {
                     }`}
                   >
                     {key}
+                    {editedScreens?.[key] && (
+                      <span className="ml-1 text-amber-400">•</span>
+                    )}
                   </button>
                 ))}
                 {screenKeys.length === 0 && (
-                  <span className="text-xs text-gray-400">
-                    No LLM screens (use_llm=false)
-                  </span>
+                  <span className="text-xs text-gray-400">No screens</span>
                 )}
               </div>
-            </div>
-
-            <div className="flex-1 overflow-auto p-4">
-              {a2uiPayload ? (
-                <A2Renderer
-                  a2uiState={a2uiPayload}
-                  isMobile={false}
-                  onAction={(id: string, data?: Record<string, unknown>) =>
-                    console.log('[Preview] Action:', id, data)
-                  }
-                />
-              ) : (
-                <div className="flex items-center justify-center h-full text-sm text-gray-400">
-                  No screen to preview
-                </div>
+              {screenKeys.length > 0 && (
+                <button
+                  onClick={() => {
+                    const next = !editMode;
+                    setEditMode(next);
+                    if (next) {
+                      const current = effectiveScreens[activeScreen];
+                      setJsonEditText(current ? JSON.stringify(current, null, 2) : '{}');
+                      setJsonError('');
+                    }
+                  }}
+                  className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                    editMode
+                      ? 'bg-amber-100 text-amber-700 ring-1 ring-amber-300'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {editMode ? 'Preview' : '✎ Edit JSON'}
+                </button>
               )}
             </div>
 
+            {/* Body: preview or editor */}
+            {editMode ? (
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <textarea
+                  value={jsonEditText}
+                  onChange={(e) => handleJsonEdit(e.target.value, screens)}
+                  spellCheck={false}
+                  className={`flex-1 resize-none font-mono text-xs p-3 focus:outline-none bg-slate-900 text-slate-200 leading-relaxed ${
+                    jsonError ? 'border-b-2 border-red-500' : ''
+                  }`}
+                />
+                {jsonError && (
+                  <div className="px-3 py-1.5 bg-red-50 border-t border-red-200">
+                    <p className="text-xs text-red-600 font-mono">{jsonError}</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex-1 overflow-auto p-4">
+                {a2uiPayload ? (
+                  <A2Renderer
+                    a2uiState={a2uiPayload}
+                    isMobile={false}
+                    onAction={(id: string, data?: Record<string, unknown>) =>
+                      console.log('[Preview] Action:', id, data)
+                    }
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-sm text-gray-400">
+                    No screen to preview
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Voice text bar */}
-            {currentScreen?.voice_text && (
+            {currentScreen?.voice_text && !editMode && (
               <div className="border-t border-gray-100 px-4 py-2.5 bg-blue-50">
                 <p className="text-xs text-blue-700">
-                  <span className="font-semibold">🎙 Voice:</span>{' '}
+                  <span className="font-semibold">Voice:</span>{' '}
                   {currentScreen.voice_text.replace('{response}', '[agent response]')}
                 </p>
               </div>
             )}
           </div>
         </div>
+
+        {/* Edit notice */}
+        {hasEdits && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 flex items-center gap-2">
+            <span className="text-amber-600 text-sm">✎</span>
+            <p className="text-xs text-amber-800">
+              You&apos;ve edited {Object.keys(editedScreens!).length} screen(s). These changes will be
+              used when the plugin is written — the LLM won&apos;t re-run.
+            </p>
+            <button
+              onClick={() => { setEditedScreens(null); setJsonEditText(''); setJsonError(''); }}
+              className="ml-auto text-xs text-amber-600 underline hover:text-amber-800"
+            >
+              Discard edits
+            </button>
+          </div>
+        )}
 
         {/* LLM reasoning */}
         {preview.llm_reasoning && (

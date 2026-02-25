@@ -66,6 +66,7 @@ class ImportRequest(BaseModel):
     dry_run: bool = False
     force: bool = False          # overwrite existing plugin directory
     use_llm: bool = True         # Phase 2: run LLM-assisted A2UI design
+    screens_override: Optional[dict] = None  # skip LLM; use caller-supplied screens
 
     @field_validator("plugin_id")
     @classmethod
@@ -392,11 +393,22 @@ async def import_agent(req: ImportRequest) -> ImportResponse:
         readme_excerpt = _read_readme(repo_root)
         requirements = _collect_requirements(repo_root)
 
-        # ── Step 4a: LLM-assisted A2UI design (Phase 2) ──────────────────────
+        # ── Step 4a: A2UI design ──────────────────────────────────────────────
         external_module = _derive_module_path(graph_entry.file_path)
         llm_result: Optional[DesignResult] = None
 
-        if req.use_llm:
+        if req.screens_override is not None:
+            # Caller supplied edited screens — skip LLM entirely
+            logger.info("[Import] Using caller-supplied screens_override for %s", req.plugin_id)
+            llm_result = DesignResult(
+                screens=req.screens_override,
+                input_field=result.detected_input_field,
+                output_accessor=result.detected_output_field,
+                initial_domain_state={},
+                reasoning="User-edited screens (screens_override supplied).",
+                used_fallback=False,
+            )
+        elif req.use_llm:
             logger.info("[Import] Running LLM A2UI design (plugin_id=%s)", req.plugin_id)
             try:
                 llm_result = await llm_design(
