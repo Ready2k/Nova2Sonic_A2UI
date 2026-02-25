@@ -40,7 +40,7 @@ from app.agent.core.importer.generator import (
     render,
     validate_plugin_id,
 )
-from app.agent.core.importer.llm_designer import design as llm_design, DesignResult
+from app.agent.core.importer.llm_designer import design as llm_design, refine as llm_refine, DesignResult
 from app.agent.core.registry import list_plugins
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,19 @@ class ImportResponse(BaseModel):
     llm_used_fallback: bool = False
     llm_reasoning: Optional[str] = None
     llm_screens: Optional[dict] = None  # the A2UI screen definitions Claude produced
+
+
+class RefineRequest(BaseModel):
+    plugin_id: str
+    screens: Dict[str, Any]
+    user_message: str
+    readme_excerpt: str = ""
+
+
+class RefineResponse(BaseModel):
+    screens: Dict[str, Any]
+    reasoning: str
+    used_fallback: bool = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -615,3 +628,23 @@ async def import_agent(req: ImportRequest) -> ImportResponse:
 async def list_registered_plugins() -> Dict[str, Any]:
     """Return all currently registered plugin IDs."""
     return {"plugins": list_plugins()}
+
+
+@router.post("/import-agent/refine")
+async def refine_screens(req: RefineRequest) -> RefineResponse:
+    """
+    Refine existing A2UI screens based on a conversational user request.
+    Uses LLM (Sonnet → Haiku fallback). Never raises — returns unchanged screens on total failure.
+    """
+    logger.info("[Import] Refine request: plugin_id=%s message=%r", req.plugin_id, req.user_message[:80])
+    result = await llm_refine(
+        plugin_id=req.plugin_id,
+        current_screens=req.screens,
+        user_request=req.user_message,
+        readme_excerpt=req.readme_excerpt,
+    )
+    return RefineResponse(
+        screens=result.screens,
+        reasoning=result.reasoning,
+        used_fallback=result.used_fallback,
+    )

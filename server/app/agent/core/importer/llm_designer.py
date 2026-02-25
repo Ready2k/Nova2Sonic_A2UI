@@ -462,6 +462,113 @@ def _design_sync(
     return _invoke_structured(model_id, _SYSTEM_PROMPT, user_prompt, A2UIDesign)
 
 
+# ── Refine prompt ─────────────────────────────────────────────────────────────
+
+_REFINE_SYSTEM_PROMPT = f"""You are an expert in the A2UI voice-first banking assistant component system.
+
+Your task is to update existing A2UI screen definitions based on a user's request.
+
+{_A2UI_COMPONENT_GUIDE}
+
+You MUST respond with valid JSON in this exact format:
+{{"screens": {{<screen_key>: <screen_def>, ...}}, "reasoning": "1-2 sentences explaining changes"}}
+
+Rules:
+- Return ALL screens (include unchanged ones).
+- Preserve the 'result' screen's {{response}} placeholders.
+- No markdown fences, no explanation text outside the JSON.
+"""
+
+
+def _refine_sync(
+    plugin_id: str,
+    current_screens: Dict[str, Any],
+    user_request: str,
+    readme_excerpt: str,
+    model_id: str,
+) -> DesignResult:
+    agent_name = " ".join(w.capitalize() for w in plugin_id.split("_"))
+    user_prompt = (
+        f"Plugin ID: {plugin_id}\n"
+        f"Agent description: {readme_excerpt or '(not available)'}\n\n"
+        f"Current screens:\n{json.dumps(current_screens, indent=2)}\n\n"
+        f"User request: {user_request}\n\n"
+        "Update the screens to satisfy the request. Return all screens (including unchanged ones)."
+    )
+
+    raw = _invoke_converse(model_id, _REFINE_SYSTEM_PROMPT, user_prompt)
+    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    data = json.loads(raw)
+
+    screens_raw = data.get("screens", current_screens)
+    reasoning = data.get("reasoning", "Screens updated.")
+
+    all_warnings: List[str] = []
+    screens_out: Dict[str, dict] = {}
+    for key, screen_raw in screens_raw.items():
+        if isinstance(screen_raw, dict):
+            screen_def = ScreenDef.model_validate(screen_raw)
+            screen_dict, comp_warnings = _validate_screen(screen_def, plugin_id, key)
+            screens_out[key] = screen_dict
+            all_warnings.extend(comp_warnings)
+
+    # Ensure mandatory screens are present (fall back to current or defaults)
+    for required_key in ("welcome", "result", "error"):
+        if required_key not in screens_out:
+            screens_out[required_key] = current_screens.get(
+                required_key, _fallback_screens(plugin_id, agent_name)[required_key]
+            )
+
+    if all_warnings:
+        logger.warning("[LLMDesigner] Refine component warnings: %s", all_warnings)
+
+    return DesignResult(
+        screens=screens_out,
+        input_field="messages",
+        output_accessor="messages[-1].content",
+        initial_domain_state={},
+        reasoning=reasoning,
+        used_fallback=False,
+    )
+
+
+async def refine(
+    plugin_id: str,
+    current_screens: Dict[str, Any],
+    user_request: str,
+    readme_excerpt: str = "",
+    sonnet_model_id: str = _DEFAULT_SONNET,
+    haiku_model_id: str = _DEFAULT_HAIKU,
+) -> DesignResult:
+    """
+    Refine existing A2UI screens based on a conversational user request.
+
+    Fallback chain: Sonnet → Haiku → unchanged screens (never raises).
+    """
+    for model_label, model_id in [("Sonnet", sonnet_model_id), ("Haiku", haiku_model_id)]:
+        try:
+            logger.info("[LLMDesigner] Refine with %s (%s)", model_label, model_id)
+            result = await asyncio.to_thread(
+                _refine_sync, plugin_id, current_screens, user_request, readme_excerpt, model_id
+            )
+            logger.info("[LLMDesigner] Refine complete (%s). Screens: %s",
+                        model_label, list(result.screens.keys()))
+            return result
+        except Exception as exc:
+            logger.warning("[LLMDesigner] Refine %s failed: %s — %s", model_label, type(exc).__name__, exc)
+
+    logger.warning("[LLMDesigner] All refine attempts failed — returning unchanged screens")
+    return DesignResult(
+        screens=current_screens,
+        input_field="messages",
+        output_accessor="messages[-1].content",
+        initial_domain_state={},
+        reasoning="Unable to process the request right now — screens unchanged.",
+        used_fallback=True,
+        fallback_reason="All LLM attempts failed during refine",
+    )
+
+
 # ── Public async entry point ──────────────────────────────────────────────────
 
 async def design(
