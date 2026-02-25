@@ -211,6 +211,8 @@ export function useMortgageSocket(url: string) {
     const recordingProcessorRef = useRef<ScriptProcessorNode | null>(null);
     const lastSpeechTimeRef = useRef<number>(0);
     const hasSpokenRef = useRef<boolean>(false);
+    // Ref so the WebSocket onmessage closure can call sendAudioStart before it is declared.
+    const sendAudioStartRef = useRef<((interrupt?: boolean) => Promise<void>) | null>(null);
 
     useEffect(() => { ttfbRef.current = ttfb; }, [ttfb]);
     useEffect(() => { uiPatchLatencyRef.current = uiPatchLatency; }, [uiPatchLatency]);
@@ -323,7 +325,7 @@ export function useMortgageSocket(url: string) {
                     console.log('[Auto-Restart] Server finished sending voice, scheduling mic in 400ms');
                     setTimeout(() => {
                         if (modeRef.current === 'voice' && connected) {
-                            sendAudioStart(false).catch(err => console.error('[Auto-Restart] Failed:', err));
+                            sendAudioStartRef.current?.(false).catch(err => console.error('[Auto-Restart] Failed:', err));
                         }
                     }, 400);
                 }
@@ -360,6 +362,9 @@ export function useMortgageSocket(url: string) {
             stopAudioBuffer();
             stopRecording();
         };
+    // `connected` is intentionally excluded — including it would cause the WebSocket
+    // to teardown and reconnect on every state change, creating an infinite loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [url, shouldConnect, stopAudioBuffer, stopRecording]);
 
     const connect = useCallback(() => setShouldConnect(true), []);
@@ -533,6 +538,8 @@ registerProcessor('pcm16-processor', PCM16Processor);
             throw err;
         }
     };
+    // Keep ref in sync so the WS onmessage closure always calls the latest version.
+    sendAudioStartRef.current = sendAudioStart;
 
     const sendAudioStop = () => {
         if (!socket) return;

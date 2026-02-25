@@ -12,26 +12,24 @@ load_dotenv()
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from .models import WebSocketMessage, ActionPayload
-from .agent.core.contracts import PluginBase
-from .agent.core.registry import register, get_plugin
+from .agent.core.registry import get_plugin
 from .agent.core.runtime_adapter import invoke_graph
-from .agent.plugins.mortgage.plugin import MortgagePlugin
-from .agent.plugins.lost_card.plugin import LostCardPlugin
-
-# Register all plugins at startup.
-register(MortgagePlugin())
-register(LostCardPlugin())
+from .agent.plugin_loader import load_all_plugins
 from .nova_sonic import NovaSonicSession
 from .langfuse_util import get_langfuse_callback
 
 logging.basicConfig(level=logging.INFO)
 
-
-
-
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Barclays Mortgage Assistant")
+
+# Auto-discover and register all plugins found under app.agent.plugins.
+load_all_plugins()
+
+# Admin / import API
+from .admin import router as admin_router  # noqa: E402
+app.include_router(admin_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -335,13 +333,6 @@ async def process_outbox(websocket: WebSocket, sid: str):
         await send_msg(websocket, sid, "server.agent.thinking", {"state": "idle"})
     finally:
         session_data["processing_outbox"] = False
-
-
-@app.get("/agents")
-async def list_agents():
-    """Return registered agent plugin IDs. Used for health checks and tooling."""
-    from .agent.core.registry import list_plugins
-    return {"agents": list_plugins()}
 
 
 @app.websocket("/ws")

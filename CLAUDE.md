@@ -126,6 +126,8 @@ Missing component types render as a visible red error box (not a crash).
 | `AWS_REGION` | server | Defaults to `us-east-1` |
 | `AWS_PROFILE` | server | Alternative to key/secret |
 | `AGENT_MODEL_ID` | server | Defaults to `amazon.nova-lite-v1:0` |
+| `DESIGNER_SONNET_MODEL_ID` | server | A2UI design model. Defaults to `us.anthropic.claude-sonnet-4-6-20251101-v1:0` |
+| `DESIGNER_HAIKU_MODEL_ID` | server | A2UI design fallback model. Defaults to `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `NEXT_PUBLIC_WS_URL` | client | Defaults to `ws://localhost:8000/ws` |
 
 ### Key Files

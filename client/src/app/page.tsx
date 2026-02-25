@@ -1,17 +1,18 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Image from 'next/image';
 import { useMortgageSocket } from '../hooks/useMortgageSocket';
-import A2Renderer, { A2UIPayload } from '../components/A2Renderer';
+import A2Renderer from '../components/A2Renderer';
 import LatencyHud from '../components/LatencyHud';
 import { langfuse } from '../lib/langfuse';
 
 export default function Home() {
-  const [agentParam, setAgentParam] = useState('mortgage');
-  useEffect(() => {
-    setAgentParam(new URLSearchParams(window.location.search).get('agent') || 'mortgage');
-  }, []);
+  const [agentParam] = useState(() =>
+    typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('agent') || 'mortgage'
+      : 'mortgage'
+  );
   const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws"}?agent=${agentParam}`;
   const {
     connected,
@@ -95,7 +96,7 @@ export default function Home() {
       panel.removeEventListener('scroll', updateChatPosition);
       window.removeEventListener('resize', updateChatPosition);
     };
-  }, [a2uiState, messages]);
+  }, [a2uiState, messages, isMobile]);
 
   useEffect(() => {
     // Scroll to bottom of message log when new message is added
@@ -429,9 +430,11 @@ export default function Home() {
                     {/* Barclays Eagle Logo for existing customers */}
                     {a2uiState?.isExistingCustomer && (
                       <div className="w-8 h-8 flex items-center justify-center animate-in fade-in zoom-in duration-500">
-                        <img
+                        <Image
                           src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAMAAABF0y+mAAAAM1BMVEVHcEwAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+kAr+lRZTNJAAAAEXRSTlMAPIejVCr/ZK/Yyue/95UZeLE8H+YAAACjSURBVHgBrc5bisQgFEXRY9RtfGf+o23aRJAuG4qi1u/lbK6+whzWac/zK2jLmwM49eKIyUjKUCSFmJZABJBUIT/9pkfg7hkAPwLQ12FulqG1uk7ZyRo8WxrMx0fP1hsPKbNx6tbYcLp1IFIig61EQFPhKnhu0XElLk09iSvw6KkqamGLmJKq08rphCnISCvDQn8Fpur1oicGqy2TwHb9p+t9P78sCiCxm+C+AAAAAElFTkSuQmCC"
                           alt="Barclays Eagle"
+                          width={24}
+                          height={24}
                           className="w-6 h-6 object-contain"
                         />
                       </div>
