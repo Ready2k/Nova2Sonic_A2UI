@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import A2Renderer from '@/components/A2Renderer';
 import type { A2UIPayload, A2UIComponent } from '@/components/A2Renderer';
@@ -62,6 +62,17 @@ interface ApiResult {
     import_error: string | null;
     smoke_test: SmokeTestResult | null;
   } | null;
+}
+
+interface ChatMessage {
+  role: 'assistant' | 'user';
+  text: string;
+}
+
+interface RefineApiResponse {
+  screens: Record<string, ScreenDef>;
+  reasoning: string;
+  used_fallback: boolean;
 }
 
 // ── API helpers ───────────────────────────────────────────────────────────────
@@ -257,6 +268,18 @@ export default function TransferPage() {
   const [jsonEditText, setJsonEditText] = useState('');
   const [jsonError, setJsonError] = useState('');
 
+  // Chat with designer
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isRefining, setIsRefining] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // ── Auto-scroll chat to bottom ────────────────────────────────────────────
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleAnalyse = useCallback(async () => {
@@ -276,6 +299,13 @@ export default function TransferPage() {
         dry_run: true,
       });
       setPreview(result);
+      // Seed designer chat with initial reasoning
+      setChatMessages(
+        result.llm_reasoning
+          ? [{ role: 'assistant', text: result.llm_reasoning }]
+          : []
+      );
+      setChatInput('');
       // Default to first available screen
       if (result.llm_screens) {
         setActiveScreen(Object.keys(result.llm_screens)[0] || 'welcome');
@@ -324,7 +354,43 @@ export default function TransferPage() {
     setEditedScreens(null);
     setJsonEditText('');
     setJsonError('');
+    setChatMessages([]);
+    setChatInput('');
   }, []);
+
+  const handleChatRefine = useCallback(async () => {
+    if (!preview || !chatInput.trim() || isRefining) return;
+    const message = chatInput.trim();
+    const currentScreens = editedScreens ?? preview.llm_screens ?? {};
+    setChatMessages((prev) => [...prev, { role: 'user', text: message }]);
+    setChatInput('');
+    setIsRefining(true);
+    try {
+      const res = await fetch('/api/import-agent/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          plugin_id: preview.plugin_id,
+          screens: currentScreens,
+          user_message: message,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error((err as { detail?: string }).detail || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as RefineApiResponse;
+      setEditedScreens(data.screens as Record<string, ScreenDef>);
+      setChatMessages((prev) => [...prev, { role: 'assistant', text: data.reasoning }]);
+    } catch (e) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', text: `Sorry, I couldn't update the screens: ${e instanceof Error ? e.message : String(e)}` },
+      ]);
+    } finally {
+      setIsRefining(false);
+    }
+  }, [preview, chatInput, isRefining, editedScreens]);
 
   // Switch screen: load its (possibly edited) JSON into the editor textarea
   const handleSelectScreen = useCallback((key: string, screens: Record<string, ScreenDef>) => {
@@ -636,13 +702,13 @@ export default function TransferPage() {
           </div>
         </div>
 
-        {/* Edit notice */}
-        {hasEdits && (
+        {/* Edit notice (only shown when not in LLM design mode) */}
+        {hasEdits && !preview.llm_design_used && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 flex items-center gap-2">
             <span className="text-amber-600 text-sm">✎</span>
             <p className="text-xs text-amber-800">
               You&apos;ve edited {Object.keys(editedScreens!).length} screen(s). These changes will be
-              used when the plugin is written — the LLM won&apos;t re-run.
+              used when the plugin is written.
             </p>
             <button
               onClick={() => { setEditedScreens(null); setJsonEditText(''); setJsonError(''); }}
@@ -653,13 +719,81 @@ export default function TransferPage() {
           </div>
         )}
 
-        {/* LLM reasoning */}
-        {preview.llm_reasoning && (
-          <div className="bg-white rounded-xl border border-blue-100 px-5 py-4">
-            <p className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">
-              ✦ Claude&apos;s design reasoning
-            </p>
-            <p className="text-sm text-gray-700">{preview.llm_reasoning}</p>
+        {/* Chat with designer */}
+        {preview.llm_design_used && (
+          <div className="bg-white rounded-xl border border-blue-100 flex flex-col" style={{ height: '260px' }}>
+            <div className="px-4 py-2 border-b border-blue-100 flex items-center gap-2 shrink-0">
+              <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">
+                ✦ Chat with designer
+              </span>
+              <span className="text-xs text-gray-400">
+                Ask Claude to update the screens
+              </span>
+              {hasEdits && (
+                <span className="ml-auto text-[10px] text-amber-600 font-medium">
+                  {Object.keys(editedScreens!).length} screen(s) modified ·{' '}
+                  <button
+                    onClick={() => { setEditedScreens(null); setJsonEditText(''); setJsonError(''); }}
+                    className="underline hover:text-amber-800"
+                  >
+                    discard
+                  </button>
+                </span>
+              )}
+            </div>
+
+            {/* Message history */}
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+              {chatMessages.map((msg, i) => (
+                <div
+                  key={i}
+                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-[85%] px-3 py-2 rounded-xl text-sm leading-snug ${
+                      msg.role === 'user'
+                        ? 'bg-blue-600 text-white rounded-br-sm'
+                        : 'bg-gray-100 text-gray-700 rounded-bl-sm'
+                    }`}
+                  >
+                    {msg.text}
+                  </div>
+                </div>
+              ))}
+              {isRefining && (
+                <div className="flex justify-start">
+                  <div className="bg-gray-100 text-gray-400 px-3 py-2 rounded-xl text-sm rounded-bl-sm">
+                    <span className="animate-pulse">Updating screens…</span>
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input bar */}
+            <div className="border-t border-gray-100 px-3 py-2 flex gap-2 shrink-0">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleChatRefine();
+                  }
+                }}
+                placeholder="e.g. make the error message red and flashing"
+                className="flex-1 px-3 py-1.5 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50"
+                disabled={isRefining}
+              />
+              <button
+                onClick={handleChatRefine}
+                disabled={!chatInput.trim() || isRefining}
+                className="px-4 py-1.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-40 transition-colors"
+              >
+                Send
+              </button>
+            </div>
           </div>
         )}
 
