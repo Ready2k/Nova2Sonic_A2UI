@@ -234,3 +234,7 @@ server/*.pid
 !client/src/
 !client/src/lib/
 !client/src/lib/langfuse.ts
+
+# Claude
+.claude/
+CLAUDE.md

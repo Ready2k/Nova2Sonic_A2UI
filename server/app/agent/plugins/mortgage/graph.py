@@ -310,7 +310,7 @@ class MortgageIntent(BaseModel):
     propertyValue: Optional[int] = Field(description="The value of the property in GBP", default=None)
     loanBalance: Optional[int] = Field(description="The requested mortgage amount (for purchases) or existing loan balance (for remortgages) in GBP", default=None)
     fixYears: Optional[int] = Field(description="The requested fixed rate term in years, e.g. 2, 5, 10", default=None)
-    termYears: Optional[int] = Field(description="The overall mortgage repayment term in years, default is 25", default=25)
+    termYears: Optional[int] = Field(description="The overall mortgage repayment term in years, e.g. 25, 30", default=None)
     existingCustomer: Optional[bool] = Field(description="Whether the user already banks with Barclays", default=None)
     propertySeen: Optional[bool] = Field(description="Whether the user has already found a property they want to buy", default=None)
     isJoint: Optional[bool] = Field(description="Whether this is a joint mortgage application", default=None)
@@ -352,7 +352,12 @@ def interpret_intent(state: AgentState):
     elif intent.get("loanBalance") is None:
         last_question_context = "The last question asked was about the mortgage amount or loan balance. Extract the number from the answer."
     elif intent.get("fixYears") is None:
-        last_question_context = "The last question asked was about fixed term years (2, 3, 5, or 10). Extract the number."
+        last_question_context = "The last question asked was about fixed term years (usually 2, 3, 5, or 10). Extract the number."
+    elif intent.get("termYears") is None:
+        last_question_context = "The last question asked was about the overall mortgage repayment term in years (usually 25, 30, or 35). Extract the number."
+
+    elif intent.get("address") is None:
+        last_question_context = "The last question asked was about the property address."
 
     if os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_PROFILE"):
         try:
@@ -383,13 +388,16 @@ def interpret_intent(state: AgentState):
                 "- IMPORTANT: Do NOT guess, assume, or provide default values for fields like propertyValue, annualIncome, or loanBalance if not stated.\n"
                 "- If the user says 'Number One [Street]' or 'First House', do NOT interpret 'one' as fixYears or propertyValue; it is part of the address.\n"
                 "- Interpret short answers (yes/no/yeah/nope) using the 'Context' provided above.\n"
-                "- For money, '400k' = 400000. If joint application, SUM the incomes provided.\n"
+                "- Note that spoken currency may lack thousands indicators. If a user says '350' for a property value or income, it almost certainly means '350,000' or similar scale depending on context. Phrases like 'around a hundred thousand' should be extracted as 100000.\n"
                 "- If the user mentions applying with a partner, set 'isJoint' to true.\n"
                 "- If they share life feelings (excited, nervous), capture it in 'notes'.\n"
-                "- If they are just being conversational ('okay', 'thanks'), leave all fields as they were.\n"
+                "- If they are just being conversational ('okay', 'thanks'), leave all fields as they were. Do NOT clear existing fields.\n"
                 "- If the user provides a postcode (especially if they spell it out phonetically like 's for sugar'), extract it into the 'address' field. Recognize that 'for' often precedes a phonetic word (e.g., 't for tango' means 'T').\n"
                 "- If the user is giving a property address and postcode, combine them into 'address'.\n"
-                "- DO NOT change any field that already has a value unless the user is explicitly CORRECTING it.\n"
+                "- If the user explicitly asks to skip, move on, or says they do not know the postcode or address, set 'address' to 'Skipped' so we can proceed.\n"
+                "- IMPORTANT: If the user says an existing value is wrong, or explicitly corrects a value (e.g., 'no that's my income, not the property value'), MUST update the appropriate field with the correct value AND REMOVE/NULLIFY the incorrectly assigned field, or replace it if they provide the correct value for it. DO NOT ignore explicit corrections.\n"
+                "- STRICT ISOLATION: When the user corrects ONE specific field (e.g., correcting their income), ONLY change that specific field. Do NOT accidentally overwrite other fields (like propertyValue) with the new number.\n"
+                "- DO NOT change any field that already has a value UNLESS the user is explicitly CORRECTING it.\n"
             )
             lc_messages.append(HumanMessage(content=current_prompt))
 
@@ -418,6 +426,13 @@ def interpret_intent(state: AgentState):
                 new_intent["propertySeen"] = False
 
     # ── Address/Postcode Extraction & Validation ─────────────────────────────
+    # Check for hard skip fallback (user desperately wants to bypass address validation)
+    skip_keywords = ["skip", "move on", "next question", "cancel", "don't have the postcode", "dont have the postcode", "don't know the postcode", "dont know the postcode", "do not have the postcode", "next part"]
+    ctx = _dm_get(state, "last_question_context", "").lower()
+    if "address" in ctx or "postcode" in ctx or _dm_get(state, "address_validation_failed", False):
+        if any(kw in transcript.lower() for kw in skip_keywords):
+            new_intent["address"] = "Skipped"
+
     new_address = new_intent.get("address")
     old_address = intent.get("address")
     
@@ -438,27 +453,35 @@ def interpret_intent(state: AgentState):
 
     # Validate the current address candidate if it changed
     if new_address and new_address != old_address:
-        success, vlat, vlng = _validate_address_uk(new_address)
-        if not success and spoken_pc:
-            # Maybe the combined address failed, but the postcode alone might work
-            success, vlat, vlng = _validate_address_uk(spoken_pc)
-            if success:
-                new_address = f"{new_address.split(',')[0]}, {spoken_pc}" if ',' in new_address else spoken_pc
-                new_intent["address"] = new_address
-
-        if success:
-            new_intent["lat"] = vlat
-            new_intent["lng"] = vlng
-            address_validation_failed = False
-            last_attempted_address = None
-            logger.info(f"Address validated: '{new_address}' -> ({vlat}, {vlng})")
-        else:
-            logger.warning(f"Address validation failed: '{new_address}'")
-            last_attempted_address = new_address
-            new_intent.pop("address", None) # Keep it missing so agent re-asks
+        if new_address.lower() == "skipped":
+            new_intent["address"] = "Skipped"
             new_intent.pop("lat", None)
             new_intent.pop("lng", None)
-            address_validation_failed = True
+            address_validation_failed = False
+            last_attempted_address = None
+            logger.info("Address skipped by user.")
+        else:
+            success, vlat, vlng = _validate_address_uk(new_address)
+            if not success and spoken_pc:
+                # Maybe the combined address failed, but the postcode alone might work
+                success, vlat, vlng = _validate_address_uk(spoken_pc)
+                if success:
+                    new_address = f"{new_address.split(',')[0]}, {spoken_pc}" if ',' in new_address else spoken_pc
+                    new_intent["address"] = new_address
+
+            if success:
+                new_intent["lat"] = vlat
+                new_intent["lng"] = vlng
+                address_validation_failed = False
+                last_attempted_address = None
+                logger.info(f"Address validated: '{new_address}' -> ({vlat}, {vlng})")
+            else:
+                logger.warning(f"Address validation failed: '{new_address}'")
+                last_attempted_address = new_address
+                new_intent.pop("address", None) # Keep it missing so agent re-asks
+                new_intent.pop("lat", None)
+                new_intent.pop("lng", None)
+                address_validation_failed = True
 
     # ── Branch request detection ──────────────────────────────────────────────
     branch_keywords = [
@@ -570,6 +593,8 @@ def render_missing_inputs(state: AgentState):
             missing.append("annual income")
         elif intent.get("loanBalance") is None:
             missing.append("loan balance")
+        elif intent.get("termYears") is None:
+            missing.append("repayment term (years)")
         elif intent.get("fixYears") is None:
             missing.append("fixed term (years)")
 
@@ -585,6 +610,8 @@ def render_missing_inputs(state: AgentState):
             missing.append("annual income")
         elif intent.get("loanBalance") is None:
             missing.append("mortgage amount")
+        elif intent.get("termYears") is None:
+            missing.append("repayment term (years)")
         elif intent.get("fixYears") is None:
             missing.append("fixed term (years)")
 
@@ -647,16 +674,18 @@ def render_missing_inputs(state: AgentState):
                 user_msg = (
                     f"NOTES ON USER: {notes}\n"
                     f"HISTORY: {messages[-4:]}\n"
+                    f"CURRENT INTENT (what we have saved): {intent}\n"
                     f"USER JUST SAID: '{state.get('transcript')}'\n"
                     f"DEVICE: {device}\n"
                     f"FIELD NEEDED: {target_field}\n"
                     f"JUST SELECTED CATEGORY: {just_selected} (If true, acknowledge the selection of {category_label} warmly in your opening)\n"
                     f"{address_failure_note}\n\n"
                     "INSTRUCTIONS:\n"
-                    "1. Provide a brief, clear answer to any technical questions.\n"
-                    "2. Acknowledge what the user just said (or the category they just clicked) by incorporating it into your next question or a brief statement.\n"
-                    "3. Ask for the 'field needed' clearly and directly.\n"
-                    "4. Keep the total response to 2-3 sentences."
+                    "1. Provide a brief, clear answer ONLY if the user asked a question in their LATEST message.\n"
+                    "2. Briefly acknowledge what the user just said in the LATEST message (e.g., 'Take your time', 'Thanks for that'). Do NOT summarize or repeat the entire 'CURRENT INTENT' back to the user.\n"
+                    "3. Ask for the 'FIELD NEEDED' clearly and directly. DO NOT ask for any other information or move to a different topic/field than the one specified in 'FIELD NEEDED'.\n"
+                    "4. If you believe the user just provided the 'FIELD NEEDED' in the LATEST message but it is still listed as missing, politely ask them to repeat it as you didn't quite catch the specific number or detail.\n"
+                    "5. Keep your total response to just 1 or 2 sentences max. Keep it conversational."
                 )
 
                 response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])

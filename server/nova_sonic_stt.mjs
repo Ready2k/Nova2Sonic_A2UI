@@ -233,19 +233,12 @@ async function main() {
                 if (role === 'USER' && type === 'TEXT') {
                     inUserTextBlock = true;
                 }
-
-                if (role === 'ASSISTANT' && type === 'TEXT') {
-                    // Nova Sonic's own conversational response — not a transcription, ignore.
-                    console.error(`[STT DEBUG] ${nowIso()} ASSISTANT text block started (Nova response — ignored)`);
-                }
             }
 
             if (eventData.textOutput) {
                 const role = eventData.textOutput.role;
                 const content = eventData.textOutput.content || '';
 
-                // Only accumulate USER role text — that is the verbatim transcription.
-                // ASSISTANT role is Nova Sonic's own conversational response; ignore it.
                 if (role === 'USER' && content) {
                     userTranscript += content;
                     console.log(`TRANSCRIPT_PARTIAL:${userTranscript.trim()}`);
@@ -276,6 +269,7 @@ async function main() {
         finishedNormally = true;
 
         bedrockDoneResolver();
+
         console.log(`TRANSCRIPT:${userTranscript.trim()}`);
 
     } catch (e) {

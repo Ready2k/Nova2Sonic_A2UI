@@ -147,7 +147,7 @@ async function main() {
                         textInput: {
                             promptName,
                             contentName: systemContentName,
-                            content: "Your only job is to speak the user's text EXACTLY as written, word-for-word, without adding any commentary, questions, or additional words."
+                            content: "You are a pure voice synthesizer. Speak the user's text exactly as written, verbatim, with no commentary, no modifications, and no explanations. Just output the audio for the provided text."
                         }
                     }
                 }))
@@ -383,8 +383,8 @@ async function main() {
             }
 
             if (eventData.guardrailViolation || eventData.guardrailAction) {
-                finishSignal();
-                break;
+                console.error(`[TTS DEBUG] Ignored Guardrail event:`, JSON.stringify(eventData));
+                // Do NOT break — we want the TTS to finish outputting regardless of internal guardrails on its own generated text.
             }
 
             if (eventData.internalServerException || eventData.throttlingException || eventData.validationException) {

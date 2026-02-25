@@ -118,6 +118,8 @@ async def start_sonic_stt(websocket: WebSocket, sid: str):
         "(e.g. 's t three five t w' or 'sierra tango three five tango whisky' → 'ST3 5TW'); "
         "(2) Numbers — convert unambiguous spoken number words to digits "
         "(e.g. 'four hundred thousand' → '400000', 'eighty thousand' → '80000'); "
+        "(3) Addresses — do not remove spaces between words in street names or towns "
+        "(e.g. 'hillside crescent' NOT 'hillsidecrescent'); "
         "Transcribe all other speech verbatim. Do not add commentary, context or meaning."
     )
 
@@ -145,6 +147,26 @@ async def start_sonic_stt(websocket: WebSocket, sid: str):
         return None
 
 
+import re
+
+def format_stt_transcript(text: str) -> str:
+    if not text:
+        return text
+    t = text[0].upper() + text[1:]
+    t = re.sub(r'\b[iI]\b', 'I', t)
+    t = re.sub(r"\bi'm\b", "I'm", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bi've\b", "I've", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bim\b", "I'm", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bive\b", "I've", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bdont\b", "don't", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bcant\b", "can't", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bthats\b", "that's", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bits\b", "it's", t, flags=re.IGNORECASE)
+    
+    if len(t) > 0 and t[-1] not in ".!?":
+        t += "."
+    return t
+
 async def handle_text_chunk(websocket: WebSocket, sid: str, text: str, is_user=False, is_final=False):
     session_data = sessions.get(sid)
     if not session_data: return
@@ -156,13 +178,16 @@ async def handle_text_chunk(websocket: WebSocket, sid: str, text: str, is_user=F
             session_data["user_transcripts"] = [text]
         else:
             logger.debug(f"PARTIAL USER TEXT: {text}")
-            # Send rolling partial to client for real-time display.
-            # Do NOT accumulate in user_transcripts — only the final TRANSCRIPT matters.
-            await send_msg(websocket, sid, "server.transcript.partial", {"text": text})
+            # Send rolling partial to client for real-time display, lightly formatted
+            formatted = format_stt_transcript(text)
+            # Take off the trailing period during live partials
+            if formatted.endswith("."): formatted = formatted[:-1]
+            await send_msg(websocket, sid, "server.transcript.partial", {"text": formatted})
     else:
         if "assist_buffer" not in session_data: session_data["assist_buffer"] = []
         session_data["assist_buffer"].append(text)
         await send_msg(websocket, sid, "server.transcript.final", {"text": text, "role": "assistant"}) 
+
 
 
 async def handle_finished_for_sid(websocket: WebSocket, sid: str):
@@ -189,12 +214,14 @@ async def handle_finished_for_sid(websocket: WebSocket, sid: str):
             # Skip graph invocation to avoid re-asking the same question.
             logger.info("Empty transcript after voice turn — skipping graph run.")
             return
+            
+        formatted_transcript = format_stt_transcript(full_transcript)
 
-        await send_msg(websocket, sid, "server.transcript.final", {"text": full_transcript, "role": "user"})
+        await send_msg(websocket, sid, "server.transcript.final", {"text": formatted_transcript, "role": "user"})
 
-        current_state["transcript"] = full_transcript
+        current_state["transcript"] = formatted_transcript
         current_state["mode"] = "voice"
-        current_state["messages"].append({"role": "user", "text": full_transcript})
+        current_state["messages"].append({"role": "user", "text": formatted_transcript})
 
         await send_msg(websocket, sid, "server.agent.thinking", {"state": "extracting_intent"})
         
