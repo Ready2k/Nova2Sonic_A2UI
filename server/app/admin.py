@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -273,7 +274,7 @@ def _run_import_check(plugin_id: str, plugin_class_name: str) -> ValidationResul
     )
     try:
         proc = subprocess.run(
-            ["python", "-c", check_code],
+            [sys.executable, "-c", check_code],
             cwd=str(_SERVER_DIR),
             capture_output=True,
             text=True,
@@ -337,7 +338,7 @@ print(json.dumps({{
 """
     try:
         proc = subprocess.run(
-            ["python", "-c", smoke_code],
+            [sys.executable, "-c", smoke_code],
             cwd=str(_SERVER_DIR),
             capture_output=True,
             text=True,
