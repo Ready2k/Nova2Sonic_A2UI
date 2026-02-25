@@ -30,7 +30,7 @@ if (!textToSpeak) {
     process.exit(1);
 }
 
-const voiceId = process.argv[3] || 'matthew';
+const voiceId = process.argv[3] || 'amy';
 
 const client = new BedrockRuntimeClient({
     region: process.env.AWS_REGION || 'us-east-1'
