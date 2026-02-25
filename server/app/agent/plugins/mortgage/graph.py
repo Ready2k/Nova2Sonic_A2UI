@@ -50,7 +50,16 @@ _PHONETIC_ALPHABET = {
     "kilo": "K", "lima": "L", "mike": "M", "november": "N", "oscar": "O",
     "papa": "P", "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T",
     "uniform": "U", "victor": "V", "whiskey": "W", "whisky": "W", "xray": "X",
-    "yankee": "Y", "zulu": "Z"
+    "yankee": "Y", "zulu": "Z",
+    "sugar": "S", "tommy": "T", "mother": "M", "apple": "A", "london": "L",
+    "peter": "P", "queen": "Q", "robert": "R", "uncle": "U", "baker": "B",
+    "dog": "D", "edward": "E", "freddie": "F", "george": "G", "harry": "H",
+    "isaac": "I", "jack": "J", "king": "K", "mary": "M", "nellie": "N",
+    "oliver": "O", "simon": "S", "william": "W", "zebra": "Z",
+    # Common UK postcode prefixes
+    "st": "ST", "sw": "SW", "se": "SE", "nw": "NW", "ne": "NE", "ec": "EC", "wc": "WC",
+    "eh": "EH", "ab": "AB", "nr": "NR", "br": "BR", "cr": "CR", "da": "DA", "en": "EN",
+    "ha": "HA", "ig": "IG", "kt": "KT", "rm": "RM", "sm": "SM", "tw": "TW", "ub": "UB", "wd": "WD"
 }
 
 _IGNORED_WORDS = {"for", "is", "at", "the", "and", "it", "my", "of"}
@@ -63,19 +72,51 @@ def _normalize_spoken_to_postcode(text: str) -> str | None:
     # Remove dots/hyphens, handle cases like 'tangothree' by splitting digits from letters
     cleaned = re.sub(r'([a-z])([0-9])', r'\1 \2', text.lower())
     cleaned = re.sub(r'([0-9])([a-z])', r'\1 \2', cleaned)
+    
+    # Handle concatenated spoken digits like "threefive" -> "three five"
+    for word in _SPOKEN_DIGITS.keys():
+        cleaned = re.sub(rf'({word})([a-z0-9])', r'\1 \2', cleaned)
+        cleaned = re.sub(rf'([a-z0-9])({word})', r'\1 \2', cleaned)
+
     cleaned = re.sub(r'[.\-]', ' ', cleaned).strip()
     
     tokens = cleaned.split()
     parts = []
-    for tok in tokens:
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        val = None
+        
         if tok in _SPOKEN_DIGITS:
-            parts.append(_SPOKEN_DIGITS[tok])
+            val = _SPOKEN_DIGITS[tok]
         elif tok in _PHONETIC_ALPHABET:
-            parts.append(_PHONETIC_ALPHABET[tok])
-        elif tok in _IGNORED_WORDS:
+            val = _PHONETIC_ALPHABET[tok]
+        elif len(tok) == 1 and (tok.isalpha() or tok.isdigit()):
+            val = tok.upper()
+            
+        if val:
+            # Look ahead to handle "X for [Word]" or "X [Word]" patterns
+            # which cause duplication if processed individually.
+            skip = 0
+            if i + 1 < len(tokens):
+                next_tok = tokens[i+1]
+                # Pattern: "S for Sugar" or "S for Sierra"
+                if next_tok in _IGNORED_WORDS and i + 2 < len(tokens):
+                    look_ahead = tokens[i+2]
+                    la_val = _PHONETIC_ALPHABET.get(look_ahead) or (look_ahead.upper() if len(look_ahead) == 1 else None)
+                    if la_val == val or (len(look_ahead) > 1 and look_ahead.lower().startswith(tok.lower()) and look_ahead not in _SPOKEN_DIGITS):
+                        skip = 2
+                # Pattern: "S Sierra" or "S Sugar"
+                else:
+                    la_val = _PHONETIC_ALPHABET.get(next_tok) or (next_tok.upper() if len(next_tok) == 1 else None)
+                    if la_val == val or (len(next_tok) > 1 and next_tok.lower().startswith(tok.lower()) and next_tok not in _SPOKEN_DIGITS):
+                        skip = 1
+            
+            parts.append(val)
+            i += skip + 1
             continue
-        elif len(tok) == 1: # Single letter or digit
-            parts.append(tok.upper())
+            
+        i += 1
             
     joined = ''.join(parts)
     # UK postcode regex: outward (1-2 letters + 1-2 digits + optional letter) + inward (1 digit + 2 letters)
@@ -346,6 +387,8 @@ def interpret_intent(state: AgentState):
                 "- If the user mentions applying with a partner, set 'isJoint' to true.\n"
                 "- If they share life feelings (excited, nervous), capture it in 'notes'.\n"
                 "- If they are just being conversational ('okay', 'thanks'), leave all fields as they were.\n"
+                "- If the user provides a postcode (especially if they spell it out phonetically like 's for sugar'), extract it into the 'address' field. Recognize that 'for' often precedes a phonetic word (e.g., 't for tango' means 'T').\n"
+                "- If the user is giving a property address and postcode, combine them into 'address'.\n"
                 "- DO NOT change any field that already has a value unless the user is explicitly CORRECTING it.\n"
             )
             lc_messages.append(HumanMessage(content=current_prompt))
