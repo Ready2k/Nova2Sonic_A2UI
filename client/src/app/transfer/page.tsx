@@ -357,7 +357,8 @@ export default function TransferPage() {
           Import a LangGraph Agent
         </h2>
         <p className="text-sm text-gray-500 mb-6">
-          Paste a GitHub URL that contains a{' '}
+          Paste a GitHub URL or an absolute local path to a directory that
+          contains a{' '}
           <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">
             langgraph.json
           </code>{' '}
@@ -368,14 +369,14 @@ export default function TransferPage() {
         <div className="space-y-4">
           <div>
             <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
-              GitHub URL
+              GitHub URL or local path
             </label>
             <input
-              type="url"
+              type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://github.com/org/repo"
-              className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="https://github.com/org/repo  or  /absolute/path/to/agent"
+              className="w-full px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
             />
           </div>
 
@@ -986,7 +987,7 @@ export default function TransferPage() {
 
         {step === 'idle' && renderIdle()}
         {step === 'analysing' && (
-          <Spinner label="Cloning repo, inspecting schema, generating A2UI design…" />
+          <Spinner label="Fetching agent, inspecting schema, generating A2UI design…" />
         )}
         {step === 'preview' && renderPreview()}
         {step === 'deps' && renderDeps()}

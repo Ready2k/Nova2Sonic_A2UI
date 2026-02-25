@@ -145,6 +145,11 @@ def _read_readme(repo_root: Path) -> str:
     return ""
 
 
+def _is_local_path(url: str) -> bool:
+    """True when url is a filesystem path rather than a remote URL."""
+    return not url.startswith(("http://", "https://", "git://", "ssh://", "git@"))
+
+
 async def _git_clone(url: str, dest: Path) -> None:
     """Clone url into dest with depth=1. Raises HTTPException on failure."""
     cmd = ["git", "clone", "--depth", "1", "--quiet", url, str(dest)]
@@ -175,6 +180,25 @@ async def _git_clone(url: str, dest: Path) -> None:
             413,
             f"Repo is {total_mb:.1f} MB — exceeds the {_MAX_REPO_SIZE_MB} MB limit.",
         )
+
+
+async def _acquire_repo(url: str, dest: Path) -> None:
+    """Clone from a remote URL, or copy from a local filesystem path."""
+    if _is_local_path(url):
+        local = Path(url.replace("file://", "")).expanduser().resolve()
+        if not local.exists():
+            raise HTTPException(422, f"Local path not found: {local}")
+        total_bytes = sum(f.stat().st_size for f in local.rglob("*") if f.is_file())
+        total_mb = total_bytes / (1024 * 1024)
+        if total_mb > _MAX_REPO_SIZE_MB:
+            raise HTTPException(
+                413,
+                f"Directory is {total_mb:.1f} MB — exceeds the {_MAX_REPO_SIZE_MB} MB limit.",
+            )
+        shutil.copytree(local, dest, dirs_exist_ok=False)
+        logger.info("[Import] Copied local path %s → %s", local, dest)
+    else:
+        await _git_clone(url, dest)
 
 
 def _copy_source(repo_root: Path, plugin_dir: Path) -> None:
@@ -369,9 +393,9 @@ async def import_agent(req: ImportRequest) -> ImportResponse:
     repo_root = Path(tmpdir) / "repo"
 
     try:
-        # ── Step 1: Clone ─────────────────────────────────────────────────────
-        logger.info("[Import] Cloning %s", req.url)
-        await _git_clone(req.url, repo_root)
+        # ── Step 1: Fetch (clone or copy) ─────────────────────────────────────
+        logger.info("[Import] Acquiring %s", req.url)
+        await _acquire_repo(req.url, repo_root)
 
         # ── Step 2: Parse langgraph.json ──────────────────────────────────────
         try:
