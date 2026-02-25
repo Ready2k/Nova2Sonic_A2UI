@@ -34,7 +34,7 @@ class {{ plugin_class_name }}(PluginBase):
             "state_version": self.state_version,
             # ── Domain data ───────────────────────────────────────────────────
             "domain": {
-                "{{ plugin_id }}": {{ initial_domain_state | tojson(indent=20) }},
+                "{{ plugin_id }}": {{ initial_domain_state | to_python }},
             },
         }
 

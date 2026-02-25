@@ -12,7 +12,7 @@ Security notes:
   - plugin_id is validated against a strict regex before any filesystem access.
   - Source inspection uses ast-only (no exec/import of external code).
   - git clone is sandboxed to a temp directory with a 50 MB size guard and 30s timeout.
-  - pip install is NOT run automatically — dependency info is returned to the caller.
+  - pip install runs automatically when requirements.txt is present in the imported repo.
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ _PLUGINS_ROOT = Path(__file__).parent / "agent" / "plugins"
 _CLONE_TIMEOUT_S   = 30
 _MAX_REPO_SIZE_MB  = 50
 _IMPORT_CHECK_TIMEOUT_S = 10
+_PIP_INSTALL_TIMEOUT_S  = 120
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -224,18 +225,23 @@ def _write_files(plugin_dir: Path, files: Dict[str, str]) -> List[str]:
 
 def _collect_requirements(repo_root: Path) -> List[str]:
     """
-    Read requirements.txt from the cloned repo.
-    Returns non-empty, non-comment lines. Empty list if file not found.
+    Find requirements.txt files in the repo (root + one level deep) and
+    return the merged, deduplicated list of non-comment package specifiers.
     """
-    req_file = repo_root / "requirements.txt"
-    if not req_file.exists():
-        return []
-    lines = req_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    return [
-        line.strip()
-        for line in lines
-        if line.strip() and not line.strip().startswith("#")
+    candidates = list(repo_root.glob("requirements.txt"))
+    candidates += [
+        p for p in repo_root.glob("*/requirements.txt")
+        if p.parent != repo_root  # already covered by glob above
     ]
+
+    seen: dict[str, None] = {}  # ordered dedup
+    for req_file in candidates:
+        for raw in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#"):
+                seen[line] = None
+
+    return list(seen)
 
 
 def _write_requirements(plugin_dir: Path, requirements: List[str]) -> Optional[str]:
@@ -258,6 +264,49 @@ def _write_requirements(plugin_dir: Path, requirements: List[str]) -> Optional[s
 
 _SERVER_DIR = Path(__file__).parent.parent   # server/
 _SMOKE_TEST_TIMEOUT_S = 15
+
+
+async def _install_requirements(requirements: List[str], plugin_dir: Path) -> tuple[bool, str]:
+    """
+    Install agent dependencies into the running venv with pip.
+
+    Uses sys.executable so the same venv that runs the server receives the
+    packages — identical to the fix applied to the import check subprocess.
+    Returns (ok, error_message).
+    """
+    if not requirements:
+        return True, ""
+
+    req_file = plugin_dir / "requirements_import.txt"
+    cmd = (
+        [sys.executable, "-m", "pip", "install", "-r", str(req_file)]
+        if req_file.exists()
+        else [sys.executable, "-m", "pip", "install"] + requirements
+    )
+    logger.info("[Import] Installing %d requirement(s): %s", len(requirements), requirements)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_PIP_INSTALL_TIMEOUT_S
+        )
+        if proc.returncode != 0:
+            err = (stderr or stdout or b"").decode(errors="replace")[:800]
+            logger.error("[Import] pip install failed (rc=%d): %s", proc.returncode, err)
+            return False, err
+        logger.info("[Import] pip install succeeded")
+        return True, ""
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return False, f"pip install timed out after {_PIP_INSTALL_TIMEOUT_S} s"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _run_import_check(plugin_id: str, plugin_class_name: str) -> ValidationResult:
@@ -489,6 +538,16 @@ async def import_agent(req: ImportRequest) -> ImportResponse:
             req_path = _write_requirements(plugin_dir, requirements)
             if req_path:
                 files_written.append(req_path)
+
+            # ── Step 6b: Install dependencies ────────────────────────────────
+            if requirements:
+                pip_ok, pip_err = await _install_requirements(requirements, plugin_dir)
+                if not pip_ok:
+                    warnings.append(
+                        f"Dependency install failed: {pip_err}. "
+                        "The smoke test may fail. Install manually with: "
+                        f"pip install -r {plugin_dir}/requirements_import.txt"
+                    )
 
             # ── Step 7: Import check ──────────────────────────────────────────
             validation = _run_import_check(req.plugin_id, gen_config.plugin_class_name)

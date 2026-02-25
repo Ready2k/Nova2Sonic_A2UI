@@ -8,6 +8,7 @@ either write to disk or return as a dry-run preview.
 
 from __future__ import annotations
 
+import pprint
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,6 +186,9 @@ def render(config: GeneratorConfig) -> Dict[str, str]:
         lstrip_blocks=True,
         keep_trailing_newline=True,
     )
+    # Use pprint.pformat so Python literals (None, True, False) are written
+    # instead of JSON literals (null, true, false).
+    env.filters["to_python"] = lambda v: pprint.pformat(v, width=100)
 
     context = {
         "plugin_id": config.plugin_id,
