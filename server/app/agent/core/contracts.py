@@ -96,6 +96,14 @@ class PluginBase(ABC):
         """
         return action_id
 
+    def post_invoke(self, state: Dict[str, Any]) -> None:
+        """
+        Optional hook called by the runtime after every graph invocation.
+
+        Override in plugins that need to persist state between sessions.
+        The default implementation is a no-op.
+        """
+
     @property
     def capabilities(self) -> Dict[str, Any]:
         """

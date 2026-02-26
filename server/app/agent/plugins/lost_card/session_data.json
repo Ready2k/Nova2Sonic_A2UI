@@ -1,0 +1,13 @@
+{
+  "demo": {
+    "card_status": "pending_freeze",
+    "card_last4": "4821",
+    "freeze_confirmed": true,
+    "replacement_requested": false,
+    "replacement_eta": null,
+    "identity_verified": true,
+    "risk_level": "medium",
+    "branch_requested": false,
+    "escalation_required": false
+  }
+}

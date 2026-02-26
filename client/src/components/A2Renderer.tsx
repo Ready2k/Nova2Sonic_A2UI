@@ -345,14 +345,69 @@ const A2Renderer: React.FC<A2RendererProps> = ({ a2uiState, onAction, isMobile }
             }
             case 'DataCard': {
                 const items = (component.data?.items as { label: string, value: string, icon?: string }[]) || [];
+                const status = component.data?.status as string | undefined;
+                const detail = component.data?.detail as string | undefined;
+                const hasCardContent = !!(component.text || status || detail);
                 const iconFor = (label: string) => {
-                    if (label.toLowerCase().includes('energy') || label.toLowerCase().includes('epc')) return '⚡';
-                    if (label.toLowerCase().includes('tax')) return '🏛️';
-                    if (label.toLowerCase().includes('branch') || label.toLowerCase().includes('address')) return '🏦';
-                    if (label.toLowerCase().includes('capital') || label.toLowerCase().includes('repayment')) return '💰';
-                    if (label.toLowerCase().includes('interest')) return '📈';
+                    const l = label.toLowerCase();
+                    if (l.includes('energy') || l.includes('epc')) return '⚡';
+                    if (l.includes('tax')) return '🏛️';
+                    if (l.includes('branch') || l.includes('address')) return '🏦';
+                    if (l.includes('capital') || l.includes('repayment')) return '💰';
+                    if (l.includes('interest')) return '📈';
+                    if (l.includes('status') || l.includes('card status')) return '🔒';
+                    if (l.includes('card') || l.includes('number')) return '💳';
+                    if (l.includes('holder') || l.includes('name') || l.includes('account')) return '👤';
+                    if (l.includes('delivery') || l.includes('arrival') || l.includes('estimated')) return '📦';
+                    if (l.includes('date') || l.includes('frozen') || l.includes('time')) return '🕐';
+                    if (l.includes('reference') || l.includes('case') || l.includes('ref')) return '📄';
                     return '📋';
                 };
+                const statusClasses = (s: string) => {
+                    const sl = s.toLowerCase();
+                    if (sl === 'frozen' || sl === 'pending freeze') return 'bg-blue-50 text-blue-700 border-blue-100';
+                    if (sl === 'active') return 'bg-green-50 text-green-700 border-green-100';
+                    if (sl === 'escalated' || sl === 'action required') return 'bg-red-50 text-red-700 border-red-100';
+                    if (sl === 'on its way' || sl === 'card found') return 'bg-purple-50 text-purple-700 border-purple-100';
+                    return 'bg-slate-50 text-slate-700 border-slate-100';
+                };
+
+                // Rich card mode: when text/status/detail are present (lost card agent pattern)
+                if (hasCardContent) {
+                    return (
+                        <div key={id} data-a2-id={id} data-a2-focused={component.focus}
+                            className="bg-white rounded-3xl border border-slate-100 shadow-sm p-6 mb-2 animate-in fade-in duration-500">
+                            {component.text && (
+                                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">{component.text}</p>
+                            )}
+                            {status && (
+                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest mb-3 border ${statusClasses(status)}`}>
+                                    {status}
+                                </span>
+                            )}
+                            {detail && (
+                                <p className="text-sm font-semibold text-blue-950 leading-relaxed">{detail}</p>
+                            )}
+                            {items.length > 0 && (
+                                <div className={`grid ${isMobile ? 'grid-cols-1 gap-3' : 'grid-cols-2 gap-3'} ${(status || detail) ? 'mt-4' : ''}`}>
+                                    {items.map((item, i) => (
+                                        <div key={i} className="bg-slate-50 p-4 rounded-2xl flex items-center gap-3">
+                                            <div className="w-9 h-9 rounded-xl bg-white flex items-center justify-center text-base shadow-sm flex-shrink-0">
+                                                {item.icon || iconFor(item.label)}
+                                            </div>
+                                            <div className="min-w-0">
+                                                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{item.label}</p>
+                                                <p className="text-sm font-black text-blue-950 truncate">{item.value}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    );
+                }
+
+                // Legacy items-only mode (mortgage agent grid)
                 return (
                     <div key={id} data-a2-id={id} data-a2-focused={component.focus} className={`grid ${isMobile ? 'grid-cols-1 gap-3' : 'grid-cols-2 gap-4'} mb-6`}>
                         {items.map((item, i) => (

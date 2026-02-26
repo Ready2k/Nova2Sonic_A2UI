@@ -31,4 +31,5 @@ async def invoke_graph(
     logger.debug("[RuntimeAdapter] Invoking graph for plugin=%s", plugin.plugin_id)
     result = await asyncio.to_thread(graph.invoke, state, config)
     logger.debug("[RuntimeAdapter] Graph invoke complete for plugin=%s", plugin.plugin_id)
+    plugin.post_invoke(result)
     return result
