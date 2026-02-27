@@ -674,17 +674,17 @@ def render_missing_inputs(state: AgentState):
                 user_msg = (
                     f"NOTES ON USER: {notes}\n"
                     f"HISTORY: {messages[-4:]}\n"
-                    f"CURRENT INTENT (what we have saved): {intent}\n"
+                    f"USER'S SAVED DETAILS (collected so far): {intent}\n"
                     f"USER JUST SAID: '{state.get('transcript')}'\n"
                     f"DEVICE: {device}\n"
-                    f"FIELD NEEDED: {target_field}\n"
+                    f"FIELD TO ASK THE USER FOR: {target_field}\n"
                     f"JUST SELECTED CATEGORY: {just_selected} (If true, acknowledge the selection of {category_label} warmly in your opening)\n"
                     f"{address_failure_note}\n\n"
                     "INSTRUCTIONS:\n"
                     "1. Provide a brief, clear answer ONLY if the user asked a question in their LATEST message.\n"
-                    "2. Briefly acknowledge what the user just said in the LATEST message (e.g., 'Take your time', 'Thanks for that'). Do NOT summarize or repeat the entire 'CURRENT INTENT' back to the user.\n"
-                    "3. Ask for the 'FIELD NEEDED' clearly and directly. DO NOT ask for any other information or move to a different topic/field than the one specified in 'FIELD NEEDED'.\n"
-                    "4. If you believe the user just provided the 'FIELD NEEDED' in the LATEST message but it is still listed as missing, politely ask them to repeat it as you didn't quite catch the specific number or detail.\n"
+                    "2. Briefly acknowledge what the user just said in the LATEST message (e.g., 'Take your time', 'Thanks for that'). Do NOT summarize or repeat the entire saved details back to the user.\n"
+                    "3. Ask the USER to provide the 'FIELD TO ASK THE USER FOR'. You are collecting this from them — do NOT provide it yourself. DO NOT ask for any other field.\n"
+                    "4. If you believe the user just provided that field in the LATEST message but it is still listed as missing, politely ask them to repeat it as you didn't quite catch the specific number or detail.\n"
                     "5. Keep your total response to just 1 or 2 sentences max. Keep it conversational."
                 )
 
@@ -695,7 +695,8 @@ def render_missing_inputs(state: AgentState):
                 refusal_keywords = [
                     "unable to respond", "cannot fulfill", "cannot answer",
                     "personal or people", "violate", "policy", "safety",
-                    "guardrail", "not allowed", "cannot provide", "restricted"
+                    "guardrail", "not allowed", "cannot provide", "can't provide",
+                    "restricted"
                 ]
                 transcript = state.get('transcript', '').lower()
                 is_refusal = any(kw in msg.lower() for kw in refusal_keywords) or \
@@ -1309,7 +1310,8 @@ def render_products_a2ui(state: AgentState):
             refusal_keywords = [
                 "unable to respond", "cannot fulfill", "cannot answer",
                 "personal or people", "violate", "policy", "safety",
-                "guardrail", "not allowed", "cannot provide", "restricted"
+                "guardrail", "not allowed", "cannot provide", "can't provide",
+                "restricted"
             ]
             if any(kw in msg.lower() for kw in refusal_keywords):
                 logger.warning(f"Bedrock refusal detected in product intro: {msg}")

@@ -238,3 +238,4 @@ server/*.pid
 # Claude
 .claude/
 CLAUDE.md
+CLAUDE.md
